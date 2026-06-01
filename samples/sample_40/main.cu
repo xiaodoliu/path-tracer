@@ -23,13 +23,7 @@ D color ray_color(const ray& r, int depth,
     while(0 < depth--){
         bool hit_anything = false;
         double closest_so_far = infinity;
-        // for(int i = 0; i < num_objects; ++i){
-        //     if(hit(cur, interval(0.001, closest_so_far), rec, device_objects[i])){
-        //         hit_anything = true;
-        //         closest_so_far = rec.t;
-        //     }
-        // }
-        if(hit_bvh(cur, interval(0.001, closest_so_far), rec, device_bvh_nodes, device_prim_indices, device_objects)){
+        if(hit_bvh(cur, interval(0.001, closest_so_far), rec, device_bvh_nodes, device_prim_indices, device_objects, state)){
             hit_anything = true;
             closest_so_far = rec.t;
         }
@@ -369,7 +363,8 @@ void quads() {
     host_materials[2] = material_data{material_type::LAMBERTIAN, color(0.2, 0.2, 1.0)};
     host_materials[3] = material_data{material_type::LAMBERTIAN, color(1.0, 0.5, 0.0)};
     host_materials[4] = material_data{material_type::LAMBERTIAN, color(0.2, 0.8, 0.8)};
-
+    host_materials[5] = material_data{material_type::ISOTROPIC, color(1.0, 1.0, 1.0)}; // white smoke
+    host_materials[6] = material_data{material_type::ISOTROPIC, color(0.0, 0.0, 0.0)}; // black smoke
     // Objects
     const int num_objects = 5;
     scene_object host_objects[num_objects];
@@ -453,14 +448,120 @@ void simple_light(){
         prim_indices.data(), actual_num_objects);
 }
 
+void cornell_box(){
+    // Material
+    const int num_materials = 4;
+    material_data host_materials[num_materials];
+    host_materials[0] = material_data{material_type::LAMBERTIAN, color(.65, .05, .05)}; // red
+    host_materials[1] = material_data{material_type::LAMBERTIAN, color(0.73, 0.73, 0.73)}; // white
+    host_materials[2] = material_data{material_type::LAMBERTIAN, color(0.12, .45, .15)}; // green
+    host_materials[3] = material_data{material_type::DIFFUSE_LIGHT, color(15, 15, 15)}; // light
+
+    // Objects
+    const int num_objects = 8;
+    scene_object host_objects[num_objects];
+    host_objects[0].type = object_type::QUAD;
+    host_objects[0].quad_data = quad(point3(555, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/2);
+    host_objects[1].type = object_type::QUAD;
+    host_objects[1].quad_data = quad(point3(0, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/0);
+    host_objects[2].type = object_type::QUAD;
+    host_objects[2].quad_data = quad(point3(343, 554, 332), vec3(-130, 0, 0), vec3(0, 0, -105), /*material_id=*/3);
+    host_objects[3].type = object_type::QUAD;
+    host_objects[3].quad_data = quad(point3(0, 0, 0), vec3(555, 0, 0), vec3(0, 0, 555), /*material_id=*/1);
+    host_objects[4].type = object_type::QUAD;
+    host_objects[4].quad_data = quad(point3(555, 555, 555), vec3(-555, 0, 0), vec3(0, 0, -555), /*material_id=*/1);
+    host_objects[5].type = object_type::QUAD;
+    host_objects[5].quad_data = quad(point3(0, 0, 555), vec3(555, 0, 0), vec3(0, 555, 0), /*material_id=*/1);
+    host_objects[6].type = object_type::BOX;
+    host_objects[6].box_data = box(point3(0, 0, 0), point3(165, 330, 165), /*material_id=*/1, /*angle=*/15, /*offset=*/vec3(265, 0, 295));
+    host_objects[7].type = object_type::BOX;
+    host_objects[7].box_data = box(point3(0, 0, 0), point3(165, 165, 165), /*material_id=*/1, /*angle=*/-18, /*offset=*/vec3(130, 0, 65));
+    // int object_index = 6;
+    // add_box_transformed(host_objects, object_index, point3(0, 0, 0), point3(165, 330, 165), /*material_id=*/1, 15, vec3(265, 0, 295));
+    // add_box_transformed(host_objects, object_index, point3(0, 0, 0), point3(165, 165, 165), /*material_id=*/1, -18, vec3(130, 0, 65));
+   
+    // BVH
+    int actual_num_objects = num_objects;
+    std::vector<int> prim_indices(actual_num_objects);
+    std::iota(prim_indices.begin(), prim_indices.end(), 0);
+    std::vector<bvh_node> host_bvh_nodes;
+    host_bvh_nodes.reserve(2*actual_num_objects-1);
+    int root_node_index = build_bvh(host_bvh_nodes, prim_indices, host_objects, 0, actual_num_objects);
+
+    camera cam;
+    cam.init(/*image_width=*/600, /*samples_per_pixel=*/200, /*max_depth=*/50, 
+        /*aspect_ratio=*/1.0, /*vfov=*/40, 
+        /*lookfrom=*/point3(278, 278, -800), /*lookat=*/point3(278, 278, 0), /*vup=*/vec3(0, 1, 0));
+    cam.render(cam.image_width, cam.image_height, 
+        host_objects, num_objects,
+        /*host_textures=*/nullptr, /*num_textures=*/0,
+        host_materials, num_materials,
+        host_bvh_nodes.data(), host_bvh_nodes.size(), root_node_index, 
+        prim_indices.data(), actual_num_objects);
+}
+
+void cornell_smoke(){
+    // Material
+    const int num_materials = 6;
+    material_data host_materials[num_materials];
+    host_materials[0] = material_data{material_type::LAMBERTIAN, color(.65, .05, .05)}; // red
+    host_materials[1] = material_data{material_type::LAMBERTIAN, color(0.73, 0.73, 0.73)}; // white
+    host_materials[2] = material_data{material_type::LAMBERTIAN, color(0.12, .45, .15)}; // green
+    host_materials[3] = material_data{material_type::DIFFUSE_LIGHT, color(7, 7, 7)}; // light
+    host_materials[4] = material_data{material_type::ISOTROPIC, color(1.0, 1.0, 1.0)}; // white smoke
+    host_materials[5] = material_data{material_type::ISOTROPIC, color(0.0, 0.0, 0.0)}; // black smoke
+
+    // Objects
+    const int num_objects = 8;
+    scene_object host_objects[num_objects];
+    host_objects[0].type = object_type::QUAD;
+    host_objects[0].quad_data = quad(point3(555, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/2);
+    host_objects[1].type = object_type::QUAD;
+    host_objects[1].quad_data = quad(point3(0, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/0);
+    host_objects[2].type = object_type::QUAD;
+    host_objects[2].quad_data = quad(point3(113, 554, 127), vec3(330, 0, 0), vec3(0, 0, 305), /*material_id=*/3);
+    host_objects[3].type = object_type::QUAD;
+    host_objects[3].quad_data = quad(point3(0, 0, 0), vec3(555, 0, 0), vec3(0, 0, 555), /*material_id=*/1);
+    host_objects[4].type = object_type::QUAD;
+    host_objects[4].quad_data = quad(point3(555, 555, 555), vec3(-555, 0, 0), vec3(0, 0, -555), /*material_id=*/1);
+    host_objects[5].type = object_type::QUAD;
+    host_objects[5].quad_data = quad(point3(0, 0, 555), vec3(555, 0, 0), vec3(0, 555, 0), /*material_id=*/1);
+    auto box1 = box(point3(0, 0, 0), point3(165, 330, 165), /*material_id=*/1, /*angle=*/15, /*offset=*/vec3(265, 0, 295));
+    auto box2 = box(point3(0, 0, 0), point3(165, 165, 165), /*material_id=*/1, /*angle=*/-18, /*offset=*/vec3(130, 0, 65));
+    host_objects[6].type = object_type::CONSTANT_MEDIUM;
+    host_objects[6].constant_medium_data = constant_medium(box1, 0.01, /*material_id=*/5);
+    host_objects[7].type = object_type::CONSTANT_MEDIUM;
+    host_objects[7].constant_medium_data = constant_medium(box2, 0.01, /*material_id=*/4);
+    // BVH
+    int actual_num_objects = num_objects;
+    std::vector<int> prim_indices(actual_num_objects);
+    std::iota(prim_indices.begin(), prim_indices.end(), 0);
+    std::vector<bvh_node> host_bvh_nodes;
+    host_bvh_nodes.reserve(2*actual_num_objects-1);
+    int root_node_index = build_bvh(host_bvh_nodes, prim_indices, host_objects, 0, actual_num_objects);
+
+    camera cam;
+    cam.init(/*image_width=*/600, /*samples_per_pixel=*/200, /*max_depth=*/50, 
+        /*aspect_ratio=*/1.0, /*vfov=*/40, 
+        /*lookfrom=*/point3(278, 278, -800), /*lookat=*/point3(278, 278, 0), /*vup=*/vec3(0, 1, 0));
+    cam.render(cam.image_width, cam.image_height, 
+        host_objects, num_objects,
+        /*host_textures=*/nullptr, /*num_textures=*/0,
+        host_materials, num_materials,
+        host_bvh_nodes.data(), host_bvh_nodes.size(), root_node_index, 
+        prim_indices.data(), actual_num_objects);
+}
+
 int main(){
-    switch(6){
+    switch(8){
         case 1: bounding_spheres(); break;
         case 2: checker_spheres(); break;
         case 3: earth(); break;
         case 4: perlin_spheres(); break;
         case 5: quads(); break;
         case 6: simple_light(); break;
+        case 7: cornell_box(); break;
+        case 8: cornell_smoke(); break;
     }
     return 0;
 }

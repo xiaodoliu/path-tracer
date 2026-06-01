@@ -405,7 +405,7 @@ void quads() {
         prim_indices.data(), actual_num_objects);
 }
 
-void simle_light(){
+void simple_light(){
     // Texture
     const int num_textures = 2;
     texture_data host_textures[num_textures];
@@ -506,7 +506,7 @@ int main(){
         case 3: earth(); break;
         case 4: perlin_spheres(); break;
         case 5: quads(); break;
-        case 6: simle_light(); break;
+        case 6: simple_light(); break;
         case 7: cornell_box(); break;
     }
     return 0;

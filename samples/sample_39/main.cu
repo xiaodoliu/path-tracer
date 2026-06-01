@@ -453,14 +453,97 @@ void simple_light(){
         prim_indices.data(), actual_num_objects);
 }
 
+void add_box(scene_object* objects, int& object_index, const point3& a, const point3& b, int material_id) {
+    auto min = point3(fmin(a.x(), b.x()), fmin(a.y(), b.y()), fmin(a.z(), b.z()));
+    auto max = point3(fmax(a.x(), b.x()), fmax(a.y(), b.y()), fmax(a.z(), b.z()));
+    auto dx = vec3(max.x() - min.x(), 0, 0);
+    auto dy = vec3(0, max.y()-min.y(), 0);
+    auto dz = vec3(0, 0, max.z() - min.z());
+    objects[object_index].type = object_type::QUAD;
+    objects[object_index++].quad_data = quad(min, dy, dx, material_id); // back
+    objects[object_index].type = object_type::QUAD;
+    objects[object_index++].quad_data = quad(min, dx, dz, material_id); // bottom
+    objects[object_index].type = object_type::QUAD;
+    objects[object_index++].quad_data = quad(min, dz, dy, material_id); // left
+    objects[object_index].type = object_type::QUAD;
+    objects[object_index++].quad_data = quad(max, -dx, -dy, material_id); // front
+    objects[object_index].type = object_type::QUAD;
+    objects[object_index++].quad_data = quad(max, -dz, -dx, material_id); // top
+    objects[object_index].type = object_type::QUAD;
+    objects[object_index++].quad_data = quad(max, -dy, -dz, material_id); // right
+}
+
+void add_box_transformed(scene_object* objects, int& object_index, const point3& a, const point3& b, int material_id, double angle, const vec3& offset){
+    auto min = point3(fmin(a.x(), b.x()), fmin(a.y(), b.y()), fmin(a.z(), b.z()));
+    auto max = point3(fmax(a.x(), b.x()), fmax(a.y(), b.y()), fmax(a.z(), b.z()));
+    auto dx = vec3(max.x() - min.x(), 0, 0);
+    auto dy = vec3(0, max.y()-min.y(), 0);
+    auto dz = vec3(0, 0, max.z() - min.z());
+    add_quad_transformed(objects, object_index, min, dy, dx, material_id, angle, offset);
+    add_quad_transformed(objects, object_index, min, dx, dz, material_id, angle, offset);
+    add_quad_transformed(objects, object_index, min, dz, dy, material_id, angle, offset);
+    add_quad_transformed(objects, object_index, max, -dx, -dy, material_id, angle, offset);
+    add_quad_transformed(objects, object_index, max, -dz, -dx, material_id, angle, offset);
+    add_quad_transformed(objects, object_index, max, -dy, -dz, material_id, angle, offset);
+}
+
+void cornell_box(){
+    // Material
+    const int num_materials = 4;
+    material_data host_materials[num_materials];
+    host_materials[0] = material_data{material_type::LAMBERTIAN, color(.65, .05, .05)}; // red
+    host_materials[1] = material_data{material_type::LAMBERTIAN, color(0.73, 0.73, 0.73)}; // white
+    host_materials[2] = material_data{material_type::LAMBERTIAN, color(0.12, .45, .15)}; // green
+    host_materials[3] = material_data{material_type::DIFFUSE_LIGHT, color(15, 15, 15)}; // light
+
+    // Objects
+    const int num_objects = 18;
+    scene_object host_objects[num_objects];
+    host_objects[0].type = object_type::QUAD;
+    host_objects[0].quad_data = quad(point3(555, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/2);
+    host_objects[1].type = object_type::QUAD;
+    host_objects[1].quad_data = quad(point3(0, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/0);
+    host_objects[2].type = object_type::QUAD;
+    host_objects[2].quad_data = quad(point3(343, 554, 332), vec3(-130, 0, 0), vec3(0, 0, -105), /*material_id=*/3);
+    host_objects[3].type = object_type::QUAD;
+    host_objects[3].quad_data = quad(point3(0, 0, 0), vec3(555, 0, 0), vec3(0, 0, 555), /*material_id=*/1);
+    host_objects[4].type = object_type::QUAD;
+    host_objects[4].quad_data = quad(point3(555, 555, 555), vec3(-555, 0, 0), vec3(0, 0, -555), /*material_id=*/1);
+    host_objects[5].type = object_type::QUAD;
+    host_objects[5].quad_data = quad(point3(0, 0, 555), vec3(555, 0, 0), vec3(0, 555, 0), /*material_id=*/1);
+    int object_index = 6;
+    add_box_transformed(host_objects, object_index, point3(0, 0, 0), point3(165, 330, 165), /*material_id=*/1, 15, vec3(265, 0, 295));
+    add_box_transformed(host_objects, object_index, point3(0, 0, 0), point3(165, 165, 165), /*material_id=*/1, -18, vec3(130, 0, 65));
+
+    // BVH
+    int actual_num_objects = num_objects;
+    std::vector<int> prim_indices(actual_num_objects);
+    std::iota(prim_indices.begin(), prim_indices.end(), 0);
+    std::vector<bvh_node> host_bvh_nodes;
+    host_bvh_nodes.reserve(2*actual_num_objects-1);
+    int root_node_index = build_bvh(host_bvh_nodes, prim_indices, host_objects, 0, actual_num_objects);
+
+    camera cam;
+    cam.init(/*image_width=*/600, /*samples_per_pixel=*/200, /*max_depth=*/50, 
+        /*aspect_ratio=*/1.0, /*vfov=*/40, 
+        /*lookfrom=*/point3(278, 278, -800), /*lookat=*/point3(278, 278, 0), /*vup=*/vec3(0, 1, 0));
+    cam.render(cam.image_width, cam.image_height, 
+        host_objects, num_objects,
+        /*host_textures=*/nullptr, /*num_textures=*/0,
+        host_materials, num_materials,
+        host_bvh_nodes.data(), host_bvh_nodes.size(), root_node_index, 
+        prim_indices.data(), actual_num_objects);
+}
+
 int main(){
-    switch(6){
+    switch(7){
         case 1: bounding_spheres(); break;
         case 2: checker_spheres(); break;
         case 3: earth(); break;
         case 4: perlin_spheres(); break;
         case 5: quads(); break;
         case 6: simple_light(); break;
+        case 7: cornell_box(); break;
     }
     return 0;
 }
