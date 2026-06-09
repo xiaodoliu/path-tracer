@@ -1,0 +1,75 @@
+# pragma once
+
+#include "hittable.h"
+
+class quad: public hittable{
+public:
+    HD quad() = default;
+    HD quad(const point3& Q, const vec3& u, const vec3& v,
+      int material_id): Q(Q), u(u), v(v), material_id(material_id){
+        auto n = cross(u,v);
+        w = n/dot(n,n);
+        normal = normalize(n);
+        D_N_P0 = dot(normal, Q);
+        area = n.length();
+        set_bounding_box();
+    }
+
+    HD virtual void set_bounding_box() {
+        auto bbox_diagonal1 = aabb(Q, Q+u+v);
+        auto bbox_diagonal2 = aabb(Q+u, Q+v);
+        bbox = aabb(bbox_diagonal1, bbox_diagonal2);
+    }
+
+    HD aabb bounding_box() const override {return bbox;}
+
+    D bool hit(const ray& r, interval ray_t, hit_record& rec) const override {
+        auto denom = dot(normal, r.direction());
+        if(std::fabs(denom) < 1e-8) return false;
+        auto t = (D_N_P0 - dot(normal, r.origin())) / denom;
+        if(!ray_t.contains(t)) return false;
+        auto intersection = r.at(t);
+        vec3 planar_hitpt_vector = intersection - Q;
+        auto alpha = dot(w, cross(planar_hitpt_vector, v));
+        auto beta = dot(w, cross(u, planar_hitpt_vector));
+        if(!is_interior(alpha, beta, rec)) return false;
+        rec.t = t;
+        rec.p = intersection;
+        rec.material_id = material_id;
+        rec.set_face_normal(r, normal);
+        return true;
+    }
+
+    D bool is_interior(double alpha, double beta, hit_record& rec) const{
+        interval unit_interval(0, 1);
+        if(!unit_interval.contains(alpha) || !unit_interval.contains(beta)) return false;
+        rec.u = alpha;
+        rec.v = beta;
+        return true;
+    }
+
+    D double pdf_value(const point3& origin, const vec3& direction) const override {
+        hit_record rec;
+        if(!this->hit(ray(origin, direction), interval(0.001, infinity), rec)){
+            return 0;
+        }
+        auto distance_squared = rec.t * rec.t * direction.length_squared();
+        auto cosine = std::fabs(dot(direction, rec.normal)) / direction.length();
+        return distance_squared / (area * cosine);
+    }
+
+    D vec3 random(const point3& origin, curandState* state) const override {
+        auto p = Q + random_double(state) * u + random_double(state) * v;
+        return p - origin;
+    }
+    
+private:
+    point3 Q;
+    vec3 u, v;
+    vec3 w; // n/n^2
+    int material_id;
+    aabb bbox;
+    vec3 normal;
+    double D_N_P0;
+    double area;
+};
