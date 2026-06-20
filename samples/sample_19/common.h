@@ -30,7 +30,7 @@ HD inline double degrees_to_radians(double degrees){
 }
 
 D inline double random_double(curandState* state){
-    return curand_uniform(state);
+    return 1.0  - curand_uniform(state);
 }
 
 D inline double random_double(double min, double max, curandState* state){
