@@ -10,6 +10,10 @@
 #include <iostream>
 #include <vector>
 
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+
 D color ray_color(const ray& r, int depth, 
     const color& background,
     const scene_object* device_objects, int num_objects, 
@@ -107,7 +111,7 @@ void camera::render(int width, int height,
     texture_data* host_textures, int num_textures,
     material_data* host_materials, int num_materials, 
     bvh_node* host_bvh_nodes, int num_bvh_nodes, int root_node_index, 
-    int* prim_indices, int num_prim_indices, int* light_indices, int num_lights){
+    int* prim_indices, int num_prim_indices, int* light_indices, int num_lights, int frame){
 
     assert(width == this->image_width && height == this->image_height && "Image dimensions must match camera dimensions");
     dim3 block_size = dim3(16, 16);
@@ -161,12 +165,21 @@ void camera::render(int width, int height,
 
     // Free the device memory
     cudaFree(device_objects);
+    cudaFree(device_textures);
+    cudaFree(device_materials);
+    cudaFree(device_bvh_nodes);
+    cudaFree(device_prim_indices);
+    cudaFree(device_light_indices);
     cudaFree(image);
     cudaFree(rand_states);
-    write_image(std::cout, host_image, width, height);
+
+    std::ostringstream name;
+    name << "build/frames/frame_" << std::setw(4) << std::setfill('0') << frame << ".ppm";
+    std::ofstream out(name.str());
+    write_image(out, host_image, width, height);
 }
 
-void render_scene(){
+void render_scene(double t, int frame){
     // Material
     const int num_materials = 5;
     material_data host_materials[num_materials];
@@ -210,19 +223,29 @@ void render_scene(){
     host_bvh_nodes.reserve(2*actual_num_objects-1);
     int root_node_index = build_bvh(host_bvh_nodes, prim_indices, host_objects, 0, actual_num_objects);
 
+    // animate camera
+    double angle = t * 0.5;
+    double radius = 800.0;
+    point3 eye(278 + radius * sin(angle), 278, -radius * cos(angle));
+
     camera cam;
-    cam.init(/*image_width=*/600, /*samples_per_pixel=*/1000, /*max_depth=*/50, 
+    cam.init(/*image_width=*/600, /*samples_per_pixel=*/100, /*max_depth=*/50, 
         /*aspect_ratio=*/1.0, /*vfov=*/40, 
-        /*lookfrom=*/point3(278, 278, -800), /*lookat=*/point3(278, 278, 0), /*vup=*/vec3(0, 1, 0));
+        /*lookfrom=*/eye, /*lookat=*/point3(278, 278, 0), /*vup=*/vec3(0, 1, 0));
     cam.render(cam.image_width, cam.image_height, 
         host_objects, num_objects,
         /*host_textures=*/nullptr, /*num_textures=*/0,
         host_materials, num_materials,
         host_bvh_nodes.data(), host_bvh_nodes.size(), root_node_index, 
-        prim_indices.data(), actual_num_objects, light_indices, num_lights);
+        prim_indices.data(), actual_num_objects, light_indices, num_lights, /*frame=*/frame);
 }
 
 int main(){
-    render_scene();
+    int num_frames = 60;
+    for(int frame = 0; frame < num_frames; ++frame) {
+        double t = frame / 30.0;
+        render_scene(t, frame);
+        std::clog << "\rframe " << frame << " done" << std::flush;
+    }
     return 0;
 }
