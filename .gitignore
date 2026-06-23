@@ -38,3 +38,10 @@ Thumbs.db
 
 # Generated renders
 images/output/
+
+# venv
+.venv/
+
+# local files
+local/
+
