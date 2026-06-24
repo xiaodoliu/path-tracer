@@ -128,26 +128,25 @@ int build_bvh(std::vector<bvh_node>& nodes,
     }
     const int leaf_node_threshold = 2;
     if(count <= leaf_node_threshold){
-    nodes[node_index] = bvh_node{node_box, -1, -1, start, count};
+        nodes[node_index] = bvh_node{node_box, -1, -1, start, count};
+        return node_index;
+    }
+
+    int axis = node_box.longest_axis();
+
+    std::sort(prim_indices.begin() + start,
+        prim_indices.begin() + end,
+        [&](int a, int b){
+            aabb box_a = bounding_box(objects[a]);
+            aabb box_b = bounding_box(objects[b]);
+            double ca = box_a.axis_interval(axis).min + box_a.axis_interval(axis).max;
+            double cb = box_b.axis_interval(axis).min + box_b.axis_interval(axis).max;
+            return ca < cb;
+        } 
+    );
+    int mid = start + count / 2;
+    int left = build_bvh(nodes,prim_indices, objects,  start, mid);
+    int right = build_bvh(nodes,prim_indices, objects, mid, end);
+    nodes[node_index] = bvh_node{node_box, left, right, 0, 0};
     return node_index;
 }
-
-int axis = node_box.longest_axis();
-
-std::sort(prim_indices.begin() + start,
-      prim_indices.begin() + end,
-      [&](int a, int b){
-        aabb box_a = bounding_box(objects[a]);
-        aabb box_b = bounding_box(objects[b]);
-        double ca = box_a.axis_interval(axis).min + box_a.axis_interval(axis).max;
-        double cb = box_b.axis_interval(axis).min + box_b.axis_interval(axis).max;
-        return ca < cb;
-      } 
-    );
-int mid = start + count / 2;
-int left = build_bvh(nodes,prim_indices, objects,  start, mid);
-int right = build_bvh(nodes,prim_indices, objects, mid, end);
-nodes[node_index] = bvh_node{node_box, left, right, 0, 0};
-return node_index;
-}
-

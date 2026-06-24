@@ -9,6 +9,8 @@
 #include <cuda_runtime.h>
 #include <iostream>
 #include <vector>
+#include <unordered_map>
+#include <string>
 
 #include <fstream>
 #include <sstream>
@@ -71,7 +73,7 @@ __global__ void init_rand_state(curandState* rand_states, int width, int height)
     int j = blockIdx.y * blockDim.y + threadIdx.y;
     if(i >= width || j >= height) return;
     int pixel_index = (j * width + i);
-    curand_init(/*seed=*/19260817, pixel_index, 0, &rand_states[pixel_index]);
+    curand_init(/*seed=*/19971122, pixel_index, 0, &rand_states[pixel_index]);
 }
 
 __global__ void render_kernel(unsigned char* image, int width, int height, 
@@ -181,47 +183,59 @@ void camera::render(int width, int height,
 
 void render_scene(double t, int frame){
     // Material
-    const int num_materials = 5;
-    material_data host_materials[num_materials];
-    host_materials[0] = material_data{material_type::LAMBERTIAN, color(.65, .05, .05)}; // red
-    host_materials[1] = material_data{material_type::LAMBERTIAN, color(0.73, 0.73, 0.73)}; // white
-    host_materials[2] = material_data{material_type::LAMBERTIAN, color(0.12, .45, .15)}; // green
-    host_materials[3] = material_data{material_type::DIFFUSE_LIGHT, color(15, 15, 15)}; // light
-    host_materials[4] = material_data{material_type::DIELECTRIC, color(1.0, 1.0, 1.0), /*texture_id=*/-1, /*fuzz=*/0.0, /*refraction_index=*/1.5}; // glass
+    std::vector<material_data> host_materials;
+    std::unordered_map<std::string, int> material_id_map;
+
+    host_materials.push_back(material_data{material_type::LAMBERTIAN, color(.65, .05, .05)}); // red
+    material_id_map["red"] = host_materials.size() - 1;
+    host_materials.push_back(material_data{material_type::LAMBERTIAN, color(0.73, 0.73, 0.73)}); // white
+    material_id_map["white"] = host_materials.size() - 1;
+    host_materials.push_back(material_data{material_type::LAMBERTIAN, color(0.12, .45, .15)}); // green
+    material_id_map["green"] = host_materials.size() - 1;
+    host_materials.push_back(material_data{material_type::DIFFUSE_LIGHT, color(15, 15, 15)}); // light
+    material_id_map["light"] = host_materials.size() - 1;
+    host_materials.push_back(material_data{material_type::DIELECTRIC, color(1.0, 1.0, 1.0), /*texture_id=*/-1, /*fuzz=*/0.0, /*refraction_index=*/1.5}); // glass
+    material_id_map["glass"] = host_materials.size() - 1;
+    host_materials.push_back(material_data{material_type::DIELECTRIC, color(1.0, 1.0, 1.0), /*texture_id=*/-1, /*fuzz=*/0.0, /*refraction_index=*/1.45}); // window glass
+    material_id_map["window_glass"] = host_materials.size() - 1;
 
     // Objects
-    const int num_objects = 8;
-    scene_object host_objects[num_objects];
+    std::vector<scene_object> host_objects;
+    host_objects.push_back({});
     host_objects[0].type = object_type::QUAD;
-    host_objects[0].quad_data = quad(point3(555, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/2);
+    host_objects[0].quad_data = quad(point3(555, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/material_id_map.at("green"));
+    host_objects.push_back({});
     host_objects[1].type = object_type::QUAD;
-    host_objects[1].quad_data = quad(point3(0, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/0);
+    host_objects[1].quad_data = quad(point3(0, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/material_id_map.at("red"));
+    host_objects.push_back({});
     host_objects[2].type = object_type::QUAD;
-    host_objects[2].quad_data = quad(point3(343, 554, 332), vec3(-130, 0, 0), vec3(0, 0, -105), /*material_id=*/3);
+    host_objects[2].quad_data = quad(point3(343, 554, 332), vec3(-130, 0, 0), vec3(0, 0, -105), /*material_id=*/material_id_map.at("light"));
+    host_objects.push_back({});
     host_objects[3].type = object_type::QUAD;
-    host_objects[3].quad_data = quad(point3(0, 0, 0), vec3(555, 0, 0), vec3(0, 0, 555), /*material_id=*/1);
+    host_objects[3].quad_data = quad(point3(0, 0, 0), vec3(555, 0, 0), vec3(0, 0, 555), /*material_id=*/material_id_map.at("white"));
+    host_objects.push_back({});
     host_objects[4].type = object_type::QUAD;
-    host_objects[4].quad_data = quad(point3(555, 555, 555), vec3(-555, 0, 0), vec3(0, 0, -555), /*material_id=*/1);
+    host_objects[4].quad_data = quad(point3(555, 555, 555), vec3(-555, 0, 0), vec3(0, 0, -555), /*material_id=*/material_id_map.at("white"));
+    host_objects.push_back({});
     host_objects[5].type = object_type::QUAD;
-    host_objects[5].quad_data = quad(point3(0, 0, 555), vec3(555, 0, 0), vec3(0, 555, 0), /*material_id=*/1);
+    host_objects[5].quad_data = quad(point3(0, 0, 555), vec3(555, 0, 0), vec3(0, 555, 0), /*material_id=*/material_id_map.at("white"));
+    host_objects.push_back({});
     host_objects[6].type = object_type::BOX;
-    host_objects[6].box_data = box(point3(0, 0, 0), point3(165, 330, 165), /*material_id=*/1, /*angle=*/15, /*offset=*/vec3(265, 0, 295));
-    // host_objects[7].type = object_type::BOX;
-    // host_objects[7].box_data = box(point3(0, 0, 0), point3(165, 165, 165), /*material_id=*/1, /*angle=*/-18, /*offset=*/vec3(130, 0, 65));
+    host_objects[6].box_data = box(point3(0, 0, 0), point3(165, 330, 165), /*material_id=*/material_id_map.at("white"), /*angle=*/15, /*offset=*/vec3(265, 0, 295));
+    host_objects.push_back({});
     host_objects[7].type = object_type::SPHERE;
-    host_objects[7].sphere_data = sphere(point3(190, 90, 190), 90, /*material_id=*/4);
+    host_objects[7].sphere_data = sphere(point3(190, 90, 190), 90, /*material_id=*/material_id_map.at("glass"));
 
     // lights
-    const int num_lights = 2;
-    int light_indices[num_lights] = {2, 7};
+    std::vector<int> light_indices = {2, 7};
    
     // BVH
-    int actual_num_objects = num_objects;
+    int actual_num_objects = host_objects.size();
     std::vector<int> prim_indices(actual_num_objects);
     std::iota(prim_indices.begin(), prim_indices.end(), 0);
     std::vector<bvh_node> host_bvh_nodes;
     host_bvh_nodes.reserve(2*actual_num_objects-1);
-    int root_node_index = build_bvh(host_bvh_nodes, prim_indices, host_objects, 0, actual_num_objects);
+    int root_node_index = build_bvh(host_bvh_nodes, prim_indices, host_objects.data(), 0, actual_num_objects);
 
     // animate camera
     double angle = t * 0.5;
@@ -233,17 +247,18 @@ void render_scene(double t, int frame){
         /*aspect_ratio=*/1.0, /*vfov=*/40, 
         /*lookfrom=*/eye, /*lookat=*/point3(278, 278, 0), /*vup=*/vec3(0, 1, 0));
     cam.render(cam.image_width, cam.image_height, 
-        host_objects, num_objects,
+        host_objects.data(), actual_num_objects,
         /*host_textures=*/nullptr, /*num_textures=*/0,
-        host_materials, num_materials,
+        host_materials.data(), host_materials.size(),
         host_bvh_nodes.data(), host_bvh_nodes.size(), root_node_index, 
-        prim_indices.data(), actual_num_objects, light_indices, num_lights, /*frame=*/frame);
+        prim_indices.data(), actual_num_objects, light_indices.data(), light_indices.size(), /*frame=*/frame);
 }
 
 int main(){
     int num_frames = 60;
+    double fps = 30.0;
     for(int frame = 0; frame < num_frames; ++frame) {
-        double t = frame / 30.0;
+        double t = frame / fps;
         render_scene(t, frame);
         std::clog << "\rframe " << frame << " done" << std::flush;
     }
