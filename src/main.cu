@@ -182,6 +182,7 @@ void camera::render(int width, int height,
 }
 
 void render_scene(double t, int frame){
+
     // Material
     std::vector<material_data> host_materials;
     std::unordered_map<std::string, int> material_id_map;
@@ -201,33 +202,43 @@ void render_scene(double t, int frame){
 
     // Objects
     std::vector<scene_object> host_objects;
+    std::vector<int> light_indices;
+    // host_objects.push_back({});
+    // host_objects.back().type = object_type::QUAD;
+    // host_objects.back().quad_data = quad(point3(555, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/material_id_map.at("green"));
+    // host_objects.push_back({});
+    // host_objects.back().type = object_type::QUAD;
+    // host_objects.back().quad_data = quad(point3(0, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/material_id_map.at("red"));
     host_objects.push_back({});
-    host_objects[0].type = object_type::QUAD;
-    host_objects[0].quad_data = quad(point3(555, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/material_id_map.at("green"));
+    host_objects.back().type = object_type::QUAD;
+    host_objects.back().quad_data = quad(point3(343, 554, 332), vec3(-130, 0, 0), vec3(0, 0, -105), /*material_id=*/material_id_map.at("light"));
+    light_indices.push_back(host_objects.size() - 1);
+    // host_objects.push_back({});
+    // host_objects.back().type = object_type::QUAD;
+    // host_objects.back().quad_data = quad(point3(0, 0, 0), vec3(555, 0, 0), vec3(0, 0, 555), /*material_id=*/material_id_map.at("white"));
+    // host_objects.push_back({});
+    // host_objects.back().type = object_type::QUAD;
+    // host_objects.back().quad_data = quad(point3(555, 555, 555), vec3(-555, 0, 0), vec3(0, 0, -555), /*material_id=*/material_id_map.at("white"));
+    // host_objects.push_back({});
+    // host_objects.back().type = object_type::QUAD;
+    // host_objects.back().quad_data = quad(point3(0, 0, 555), vec3(555, 0, 0), vec3(0, 555, 0), /*material_id=*/material_id_map.at("white"));
+    // host_objects.push_back({});
+    // host_objects.back().type = object_type::BOX;
+    // host_objects.back().box_data = box(point3(0, 0, 0), point3(165, 330, 165), /*material_id=*/material_id_map.at("white"), /*angle=*/15, /*offset=*/vec3(265, 0, 295));
+    // host_objects.push_back({});
+    // host_objects.back().type = object_type::SPHERE;
+    // host_objects.back().sphere_data = sphere(point3(190, 90, 190), 90, /*material_id=*/material_id_map.at("glass"));
+    // think glass slab in front of the camera.
     host_objects.push_back({});
-    host_objects[1].type = object_type::QUAD;
-    host_objects[1].quad_data = quad(point3(0, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/material_id_map.at("red"));
-    host_objects.push_back({});
-    host_objects[2].type = object_type::QUAD;
-    host_objects[2].quad_data = quad(point3(343, 554, 332), vec3(-130, 0, 0), vec3(0, 0, -105), /*material_id=*/material_id_map.at("light"));
-    host_objects.push_back({});
-    host_objects[3].type = object_type::QUAD;
-    host_objects[3].quad_data = quad(point3(0, 0, 0), vec3(555, 0, 0), vec3(0, 0, 555), /*material_id=*/material_id_map.at("white"));
-    host_objects.push_back({});
-    host_objects[4].type = object_type::QUAD;
-    host_objects[4].quad_data = quad(point3(555, 555, 555), vec3(-555, 0, 0), vec3(0, 0, -555), /*material_id=*/material_id_map.at("white"));
-    host_objects.push_back({});
-    host_objects[5].type = object_type::QUAD;
-    host_objects[5].quad_data = quad(point3(0, 0, 555), vec3(555, 0, 0), vec3(0, 555, 0), /*material_id=*/material_id_map.at("white"));
-    host_objects.push_back({});
-    host_objects[6].type = object_type::BOX;
-    host_objects[6].box_data = box(point3(0, 0, 0), point3(165, 330, 165), /*material_id=*/material_id_map.at("white"), /*angle=*/15, /*offset=*/vec3(265, 0, 295));
-    host_objects.push_back({});
-    host_objects[7].type = object_type::SPHERE;
-    host_objects[7].sphere_data = sphere(point3(190, 90, 190), 90, /*material_id=*/material_id_map.at("glass"));
-
-    // lights
-    std::vector<int> light_indices = {2, 7};
+    host_objects.back().type = object_type::BOX;
+    host_objects.back().box_data = 
+        box(
+            point3(0, 0, 554.95), 
+            point3(555, 555, 555), 
+            /*material_id=*/material_id_map.at("white"), 
+            /*angle=*/0, 
+            /*offset=*/vec3(0, 0, 0)
+        );
    
     // BVH
     int actual_num_objects = host_objects.size();
@@ -243,8 +254,8 @@ void render_scene(double t, int frame){
     point3 eye(278 + radius * sin(angle), 278, -radius * cos(angle));
 
     camera cam;
-    cam.init(/*image_width=*/600, /*samples_per_pixel=*/100, /*max_depth=*/50, 
-        /*aspect_ratio=*/1.0, /*vfov=*/40, 
+    cam.init(/*image_width=*/1280, /*samples_per_pixel=*/100, /*max_depth=*/50, 
+        /*aspect_ratio=*/16.0/9.0, /*vfov=*/40, 
         /*lookfrom=*/eye, /*lookat=*/point3(278, 278, 0), /*vup=*/vec3(0, 1, 0));
     cam.render(cam.image_width, cam.image_height, 
         host_objects.data(), actual_num_objects,
