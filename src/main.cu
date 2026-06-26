@@ -182,6 +182,8 @@ void camera::render(int width, int height,
 }
 
 void render_scene(double t, int frame){
+    // anchor
+    point3 origin(0, 0, 0);
 
     // Material
     std::vector<material_data> host_materials;
@@ -211,7 +213,7 @@ void render_scene(double t, int frame){
     // host_objects.back().quad_data = quad(point3(0, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/material_id_map.at("red"));
     host_objects.push_back({});
     host_objects.back().type = object_type::QUAD;
-    host_objects.back().quad_data = quad(point3(343, 554, 332), vec3(-130, 0, 0), vec3(0, 0, -105), /*material_id=*/material_id_map.at("light"));
+    host_objects.back().quad_data = quad(point3(origin.x() + 65, origin.y() + 276, origin.z() + 332), vec3(-130, 0, 0), vec3(0, 0, -105), /*material_id=*/material_id_map.at("light"));
     light_indices.push_back(host_objects.size() - 1);
     // host_objects.push_back({});
     // host_objects.back().type = object_type::QUAD;
@@ -233,8 +235,8 @@ void render_scene(double t, int frame){
     host_objects.back().type = object_type::BOX;
     host_objects.back().box_data = 
         box(
-            point3(0, 0, 554.95), 
-            point3(555, 555, 555), 
+            point3(origin.x() - 478, origin.y() - 278, origin.z() + 554.95), 
+            point3(origin.x() + 478, origin.y() + 377, origin.z() + 555), 
             /*material_id=*/material_id_map.at("white"), 
             /*angle=*/0, 
             /*offset=*/vec3(0, 0, 0)
@@ -251,12 +253,13 @@ void render_scene(double t, int frame){
     // animate camera
     double angle = t * 0.5;
     double radius = 800.0;
-    point3 eye(278 + radius * sin(angle), 278, -radius * cos(angle));
+    point3 eye(origin.x() + radius * sin(angle), origin.y(), origin.z() -radius * cos(angle));
 
     camera cam;
     cam.init(/*image_width=*/1280, /*samples_per_pixel=*/100, /*max_depth=*/50, 
         /*aspect_ratio=*/16.0/9.0, /*vfov=*/40, 
-        /*lookfrom=*/eye, /*lookat=*/point3(278, 278, 0), /*vup=*/vec3(0, 1, 0));
+        /*lookfrom=*/eye, /*lookat=*/origin, /*vup=*/vec3(0, 1, 0), 
+        /*defocus_angle=*/0.0, /*focus_dist=*/10, /*background=*/color(0.0, 0.0, 0.0));
     cam.render(cam.image_width, cam.image_height, 
         host_objects.data(), actual_num_objects,
         /*host_textures=*/nullptr, /*num_textures=*/0,
@@ -266,7 +269,7 @@ void render_scene(double t, int frame){
 }
 
 int main(){
-    int num_frames = 60;
+    int num_frames = 1;
     double fps = 30.0;
     for(int frame = 0; frame < num_frames; ++frame) {
         double t = frame / fps;
