@@ -205,23 +205,54 @@ void render_scene(double t, int frame){
     // Objects
     std::vector<scene_object> host_objects;
     std::vector<int> light_indices;
-    // host_objects.push_back({});
-    // host_objects.back().type = object_type::QUAD;
-    // host_objects.back().quad_data = quad(point3(555, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/material_id_map.at("green"));
-    // host_objects.push_back({});
-    // host_objects.back().type = object_type::QUAD;
-    // host_objects.back().quad_data = quad(point3(0, 0, 0), vec3(0, 555, 0), vec3(0, 0, 555), /*material_id=*/material_id_map.at("red"));
+    int image_width = 1280, image_height = 720;
+    int window_size_x = 856, window_size_y = window_size_x * (image_height*1.0 / image_width);
+    int window_offset_y = - image_height *  1.0/36;
+    int from_eye_to_window_distance = 555;
+    // left wall
     host_objects.push_back({});
     host_objects.back().type = object_type::QUAD;
-    host_objects.back().quad_data = quad(point3(origin.x() + 65, origin.y() + 276, origin.z() + 332), vec3(-130, 0, 0), vec3(0, 0, -105), /*material_id=*/material_id_map.at("light"));
+    host_objects.back().quad_data = quad(
+        point3(origin.x() + window_size_x / 2, origin.y() - window_size_y / 2 + window_offset_y, origin.z()), 
+        vec3(0, window_size_y, 0), vec3(0, 0, from_eye_to_window_distance), 
+        /*material_id=*/material_id_map.at("green"));
+    // right wall
+    host_objects.push_back({});
+    host_objects.back().type = object_type::QUAD;
+    host_objects.back().quad_data = quad(
+        point3(origin.x() - window_size_x / 2, origin.y() - window_size_y / 2 + window_offset_y, origin.z()), 
+        vec3(0, 0, from_eye_to_window_distance), vec3(0, window_size_y, 0), 
+        /*material_id=*/material_id_map.at("red"));
+    
+    // light
+    double light_size_scale = 1.0;
+    point3 light_size = point3(130, 0, 105) * light_size_scale;
+    point3 light_center(origin.x(), origin.y() + window_size_y / 2 + window_offset_y - 1, origin.z() + from_eye_to_window_distance * (222.0/555.0) - light_size.z() / 2);
+    host_objects.push_back({});
+    host_objects.back().type = object_type::QUAD;
+    host_objects.back().quad_data = quad(
+        light_center + light_size / 2, 
+        vec3(-light_size.x(), 0, 0), vec3(0, 0, -light_size.z()), 
+        /*material_id=*/material_id_map.at("light"));
+
     light_indices.push_back(host_objects.size() - 1);
-    // host_objects.push_back({});
-    // host_objects.back().type = object_type::QUAD;
-    // host_objects.back().quad_data = quad(point3(0, 0, 0), vec3(555, 0, 0), vec3(0, 0, 555), /*material_id=*/material_id_map.at("white"));
-    // host_objects.push_back({});
-    // host_objects.back().type = object_type::QUAD;
-    // host_objects.back().quad_data = quad(point3(555, 555, 555), vec3(-555, 0, 0), vec3(0, 0, -555), /*material_id=*/material_id_map.at("white"));
-    // host_objects.push_back({});
+
+    // floor
+    host_objects.push_back({});
+    host_objects.back().type = object_type::QUAD;
+    host_objects.back().quad_data = quad(
+        point3(origin.x() - window_size_x / 2, origin.y() - window_size_y / 2 + window_offset_y, origin.z()), 
+        vec3(0, 0, from_eye_to_window_distance), vec3(window_size_x, 0, 0),
+        /*material_id=*/material_id_map.at("white"));
+    
+    // ceiling
+    host_objects.push_back({});
+    host_objects.back().type = object_type::QUAD;
+    host_objects.back().quad_data = quad(
+        point3(origin.x() - window_size_x / 2, origin.y() + window_size_y / 2 + window_offset_y, origin.z()),  
+        vec3(0, 0, from_eye_to_window_distance), vec3(window_size_x, 0, 0),
+        /*material_id=*/material_id_map.at("white"));
+    host_objects.push_back({});
     // host_objects.back().type = object_type::QUAD;
     // host_objects.back().quad_data = quad(point3(0, 0, 555), vec3(555, 0, 0), vec3(0, 555, 0), /*material_id=*/material_id_map.at("white"));
     // host_objects.push_back({});
@@ -231,16 +262,19 @@ void render_scene(double t, int frame){
     // host_objects.back().type = object_type::SPHERE;
     // host_objects.back().sphere_data = sphere(point3(190, 90, 190), 90, /*material_id=*/material_id_map.at("glass"));
     // think glass slab in front of the camera.
+    // window
     host_objects.push_back({});
     host_objects.back().type = object_type::BOX;
     host_objects.back().box_data = 
         box(
-            point3(origin.x() - 478, origin.y() - 278, origin.z() + 554.95), 
-            point3(origin.x() + 478, origin.y() + 377, origin.z() + 555), 
-            /*material_id=*/material_id_map.at("white"), 
-            /*angle=*/0, 
+            point3(origin.x() - window_size_x / 2, origin.y() - window_size_y / 2 + window_offset_y, origin.z() + 554.95), 
+            point3(origin.x() + window_size_x / 2, origin.y() + window_size_y / 2 + window_offset_y, origin.z() + 555), 
+            /*material_id=*/material_id_map.at("white"),
+            /*angle=*/0,        
             /*offset=*/vec3(0, 0, 0)
         );
+    
+    
    
     // BVH
     int actual_num_objects = host_objects.size();
@@ -256,7 +290,7 @@ void render_scene(double t, int frame){
     point3 eye(origin.x() + radius * sin(angle), origin.y(), origin.z() -radius * cos(angle));
 
     camera cam;
-    cam.init(/*image_width=*/1280, /*samples_per_pixel=*/100, /*max_depth=*/50, 
+    cam.init(/*image_width=*/image_width, /*samples_per_pixel=*/100, /*max_depth=*/50, 
         /*aspect_ratio=*/16.0/9.0, /*vfov=*/40, 
         /*lookfrom=*/eye, /*lookat=*/origin, /*vup=*/vec3(0, 1, 0), 
         /*defocus_angle=*/0.0, /*focus_dist=*/10, /*background=*/color(0.0, 0.0, 0.0));
