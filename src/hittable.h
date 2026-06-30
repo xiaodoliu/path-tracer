@@ -5,8 +5,8 @@
 #include "interval.h"
 #include "aabb.h"
 
-class hit_record{
-public:
+class hit_record {
+   public:
     point3 p;
     vec3 normal;
     double t;
@@ -14,9 +14,9 @@ public:
     double v;
     bool front_face;
     int material_id;
-    D void set_face_normal(const ray& r, const vec3& outward_normal){
+    D void set_face_normal(const ray& r, const vec3& outward_normal) {
         front_face = dot(r.direction(), outward_normal) < 0;
-        normal = front_face? outward_normal : -outward_normal;
-        normal = normalize(normal); // always normalize the normal vector
+        normal = front_face ? outward_normal : -outward_normal;
+        normal = normalize(normal);  // always normalize the normal vector
     }
 };

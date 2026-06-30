@@ -16,108 +16,107 @@
 #include <sstream>
 #include <iomanip>
 
-D color ray_color(const ray& r, int depth, 
-    const color& background,
-    const scene_object* device_objects, int num_objects, 
-    const texture_data* device_textures, int num_textures,
-    const material_data* device_materials, int num_materials, 
-    bvh_node* device_bvh_nodes, int num_bvh_nodes, int root_node_index,
-    int* device_prim_indices, int num_prim_indices,
-    int* device_light_indices, int num_lights,
-    curandState* state = nullptr){
+D color ray_color(const ray& r, int depth, const color& background,
+                  const scene_object* device_objects, int num_objects,
+                  const texture_data* device_textures, int num_textures,
+                  const material_data* device_materials, int num_materials,
+                  bvh_node* device_bvh_nodes, int num_bvh_nodes, int root_node_index,
+                  int* device_prim_indices, int num_prim_indices, int* device_light_indices,
+                  int num_lights, curandState* state = nullptr) {
     hit_record rec;
     color attenuation(1.0, 1.0, 1.0);
     color radiance(0, 0, 0);
     color throughput(1, 1, 1);
     ray cur = r;
-    while(0 < depth--){
-        if(!hit_bvh(cur, interval(0.001, infinity), rec, device_bvh_nodes, device_prim_indices, device_objects, state)){
+    while (0 < depth--) {
+        if (!hit_bvh(cur, interval(0.001, infinity), rec, device_bvh_nodes, device_prim_indices,
+                     device_objects, state)) {
             return radiance + throughput * background;
         }
         const material_data& mat = device_materials[rec.material_id];
         color color_from_emission = emitted(cur, rec, device_textures, mat);
         radiance += throughput * color_from_emission;
         scatter_record srec;
-        if(!scatter(cur, rec, srec, device_textures, mat, state)){
+        if (!scatter(cur, rec, srec, device_textures, mat, state)) {
             return radiance;
         }
-        if(srec.skip_pdf){
+        if (srec.skip_pdf) {
             throughput *= srec.attenuation;
             cur = srec.skip_pdf_ray;
             continue;
         }
         ray scattered;
         double pdf_val = 0.0;
-        scattered = ray(rec.p, 
-            mixture_pdf_generate(
-                rec.p, rec.normal, device_objects, device_light_indices, num_lights, 
-                srec.pdf_type, state), 
-            cur.time());
-        pdf_val = mixture_pdf_value(rec.p, scattered.direction(), rec.normal, 
-            device_objects, device_light_indices, num_lights, srec.pdf_type);
-        
-        if(pdf_val <= 0 || std::isnan(pdf_val)) {
+        scattered =
+            ray(rec.p,
+                mixture_pdf_generate(rec.p, rec.normal, device_objects, device_light_indices,
+                                     num_lights, srec.pdf_type, state),
+                cur.time());
+        pdf_val = mixture_pdf_value(rec.p, scattered.direction(), rec.normal, device_objects,
+                                    device_light_indices, num_lights, srec.pdf_type);
+
+        if (pdf_val <= 0 || std::isnan(pdf_val)) {
             return radiance;
         }
-        
+
         double spdf = scattering_pdf(cur, rec, scattered, mat);
         throughput *= srec.attenuation * spdf / pdf_val;
-            
+
         cur = scattered;
     }
     return color(0, 0, 0);
 }
 
-__global__ void init_rand_state(curandState* rand_states, int width, int height){
+__global__ void init_rand_state(curandState* rand_states, int width, int height) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y * blockDim.y + threadIdx.y;
-    if(i >= width || j >= height) return;
+    if (i >= width || j >= height) return;
     int pixel_index = (j * width + i);
     curand_init(/*seed=*/19971122, pixel_index, 0, &rand_states[pixel_index]);
 }
 
-__global__ void render_kernel(unsigned char* image, int width, int height, 
-    camera cam, scene_object* device_objects, int num_objects, 
-    texture_data* device_textures, int num_textures,
-    material_data* device_materials, int num_materials, 
-    bvh_node* device_bvh_nodes, int num_bvh_nodes, int root_node_index,
-    int* device_prim_indices, int num_prim_indices, 
-    int* device_light_indices, int num_lights,
-    curandState* rand_states = nullptr){
+__global__ void render_kernel(unsigned char* image, int width, int height, camera cam,
+                              scene_object* device_objects, int num_objects,
+                              texture_data* device_textures, int num_textures,
+                              material_data* device_materials, int num_materials,
+                              bvh_node* device_bvh_nodes, int num_bvh_nodes, int root_node_index,
+                              int* device_prim_indices, int num_prim_indices,
+                              int* device_light_indices, int num_lights,
+                              curandState* rand_states = nullptr) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y * blockDim.y + threadIdx.y;
-    if(i >= width || j >= height) return;
-    auto pixel_center = cam.pixel_sample_start + i * cam.viewport_pixel_u_delta + j * cam.viewport_pixel_v_delta;
+    if (i >= width || j >= height) return;
+    auto pixel_center =
+        cam.pixel_sample_start + i * cam.viewport_pixel_u_delta + j * cam.viewport_pixel_v_delta;
     auto ray_direction = pixel_center - cam.origin;
     ray r(cam.origin, ray_direction);
     color pixel_color(0, 0, 0);
     int pixel_index = (j * width + i) * 3;
-    curandState local_rand_state = rand_states[pixel_index/3];
-    for(int s_i = 0; s_i < cam.sqrt_spp; ++s_i){
-        for(int s_j = 0; s_j < cam.sqrt_spp; ++s_j){
+    curandState local_rand_state = rand_states[pixel_index / 3];
+    for (int s_i = 0; s_i < cam.sqrt_spp; ++s_i) {
+        for (int s_j = 0; s_j < cam.sqrt_spp; ++s_j) {
             r = cam.get_ray(i, j, s_i, s_j, &local_rand_state);
-            pixel_color += ray_color(r, cam.max_depth, cam.background,
-                device_objects, num_objects, 
-                device_textures, num_textures,
-                device_materials, num_materials, 
-                device_bvh_nodes, num_bvh_nodes, root_node_index, 
-                device_prim_indices, num_prim_indices, device_light_indices, num_lights, &local_rand_state);
+            pixel_color +=
+                ray_color(r, cam.max_depth, cam.background, device_objects, num_objects,
+                          device_textures, num_textures, device_materials, num_materials,
+                          device_bvh_nodes, num_bvh_nodes, root_node_index, device_prim_indices,
+                          num_prim_indices, device_light_indices, num_lights, &local_rand_state);
         }
-    }  
-    pixel_color /= (cam.sqrt_spp * cam.sqrt_spp * 1.0);   
+    }
+    pixel_color /= (cam.sqrt_spp * cam.sqrt_spp * 1.0);
     write_color(image, pixel_index, pixel_color);
 }
 
-void camera::render(int width, int height, 
-    scene_object* host_objects, int num_objects,
-    texture_data* host_textures, int num_textures,
-    material_data* host_materials, int num_materials, 
-    bvh_node* host_bvh_nodes, int num_bvh_nodes, int root_node_index, 
-    int* prim_indices, int num_prim_indices, int* light_indices, int num_lights, int frame){
-
-    assert(width == this->image_width && height == this->image_height && "Image dimensions must match camera dimensions");
+void camera::render(int width, int height, scene_object* host_objects, int num_objects,
+                    texture_data* host_textures, int num_textures, material_data* host_materials,
+                    int num_materials, bvh_node* host_bvh_nodes, int num_bvh_nodes,
+                    int root_node_index, int* prim_indices, int num_prim_indices,
+                    int* light_indices, int num_lights, int frame) {
+    assert(width == this->image_width && height == this->image_height &&
+           "Image dimensions must match camera dimensions");
     dim3 block_size = dim3(16, 16);
-    dim3 grid_size = dim3((width + block_size.x - 1) / block_size.x, (height + block_size.y - 1) / block_size.y);
+    dim3 grid_size =
+        dim3((width + block_size.x - 1) / block_size.x, (height + block_size.y - 1) / block_size.y);
 
     // Initialize the random state for each pixel
     curandState* rand_states;
@@ -131,33 +130,36 @@ void camera::render(int width, int height,
     cudaMalloc(&image, image_size);
     texture_data* device_textures;
     cudaMalloc(&device_textures, num_textures * sizeof(texture_data));
-    cudaMemcpy(device_textures, host_textures, num_textures * sizeof(texture_data), cudaMemcpyHostToDevice);
+    cudaMemcpy(device_textures, host_textures, num_textures * sizeof(texture_data),
+               cudaMemcpyHostToDevice);
     material_data* device_materials;
     cudaMalloc(&device_materials, num_materials * sizeof(material_data));
-    cudaMemcpy(device_materials, host_materials, num_materials * sizeof(material_data), cudaMemcpyHostToDevice);
+    cudaMemcpy(device_materials, host_materials, num_materials * sizeof(material_data),
+               cudaMemcpyHostToDevice);
     scene_object* device_objects;
     cudaMalloc(&device_objects, num_objects * sizeof(scene_object));
-    cudaMemcpy(device_objects, host_objects, num_objects * sizeof(scene_object), cudaMemcpyHostToDevice);
+    cudaMemcpy(device_objects, host_objects, num_objects * sizeof(scene_object),
+               cudaMemcpyHostToDevice);
     int* device_prim_indices;
     cudaMalloc(&device_prim_indices, num_prim_indices * sizeof(int));
-    cudaMemcpy(device_prim_indices, prim_indices, num_prim_indices * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(device_prim_indices, prim_indices, num_prim_indices * sizeof(int),
+               cudaMemcpyHostToDevice);
     bvh_node* device_bvh_nodes;
     cudaMalloc(&device_bvh_nodes, num_bvh_nodes * sizeof(bvh_node));
-    cudaMemcpy(device_bvh_nodes, host_bvh_nodes, num_bvh_nodes * sizeof(bvh_node), cudaMemcpyHostToDevice);
+    cudaMemcpy(device_bvh_nodes, host_bvh_nodes, num_bvh_nodes * sizeof(bvh_node),
+               cudaMemcpyHostToDevice);
     int* device_light_indices;
-    if(num_lights > 0){
+    if (num_lights > 0) {
         assert(light_indices != nullptr && "Light indices must not be empty.");
         cudaMalloc(&device_light_indices, num_lights * sizeof(int));
-        cudaMemcpy(device_light_indices, light_indices, num_lights * sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(device_light_indices, light_indices, num_lights * sizeof(int),
+                   cudaMemcpyHostToDevice);
     }
 
-    render_kernel<<<grid_size, block_size>>>(image, width, height,
-        *this, device_objects, num_objects, 
-        device_textures, num_textures,
-        device_materials, num_materials, 
-        device_bvh_nodes, num_bvh_nodes, root_node_index,
-        device_prim_indices, num_prim_indices, device_light_indices, num_lights,
-        rand_states);
+    render_kernel<<<grid_size, block_size>>>(
+        image, width, height, *this, device_objects, num_objects, device_textures, num_textures,
+        device_materials, num_materials, device_bvh_nodes, num_bvh_nodes, root_node_index,
+        device_prim_indices, num_prim_indices, device_light_indices, num_lights, rand_states);
     CUDA_CHECK(cudaGetLastError());
 
     // Copy the image back to the host
@@ -181,7 +183,7 @@ void camera::render(int width, int height,
     write_image(out, host_image, width, height);
 }
 
-void render_scene(double t, int frame){
+void render_scene(double t, int frame) {
     // anchor
     point3 origin(0, 0, 0);
 
@@ -189,123 +191,139 @@ void render_scene(double t, int frame){
     std::vector<material_data> host_materials;
     std::unordered_map<std::string, int> material_id_map;
 
-    host_materials.push_back(material_data{material_type::LAMBERTIAN, color(.65, .05, .05)}); // red
+    host_materials.push_back(
+        material_data{material_type::LAMBERTIAN, color(.65, .05, .05)});  // red
     material_id_map["red"] = host_materials.size() - 1;
-    host_materials.push_back(material_data{material_type::LAMBERTIAN, color(0.73, 0.73, 0.73)}); // white
+    host_materials.push_back(
+        material_data{material_type::LAMBERTIAN, color(0.73, 0.73, 0.73)});  // white
     material_id_map["white"] = host_materials.size() - 1;
-    host_materials.push_back(material_data{material_type::LAMBERTIAN, color(0.12, .45, .15)}); // green
+    host_materials.push_back(
+        material_data{material_type::LAMBERTIAN, color(0.0, 1.0, 0.0)});  // green
     material_id_map["green"] = host_materials.size() - 1;
-    host_materials.push_back(material_data{material_type::DIFFUSE_LIGHT, color(15, 15, 15)}); // light
+    host_materials.push_back(
+        material_data{material_type::DIFFUSE_LIGHT, color(20, 20, 20)});  // light
     material_id_map["light"] = host_materials.size() - 1;
-    host_materials.push_back(material_data{material_type::DIELECTRIC, color(1.0, 1.0, 1.0), /*texture_id=*/-1, /*fuzz=*/0.0, /*refraction_index=*/1.5}); // glass
+    host_materials.push_back(material_data{material_type::DIELECTRIC, color(1.0, 1.0, 1.0),
+                                           /*texture_id=*/-1, /*fuzz=*/0.0,
+                                           /*refraction_index=*/1.5});  // glass
     material_id_map["glass"] = host_materials.size() - 1;
-    host_materials.push_back(material_data{material_type::DIELECTRIC, color(1.0, 1.0, 1.0), /*texture_id=*/-1, /*fuzz=*/0.0, /*refraction_index=*/1.45}); // window glass
+    host_materials.push_back(material_data{material_type::DIELECTRIC, color(1.0, 1.0, 1.0),
+                                           /*texture_id=*/-1, /*fuzz=*/0.0,
+                                           /*refraction_index=*/1.45});  // window glass
     material_id_map["window_glass"] = host_materials.size() - 1;
 
     // Objects
     std::vector<scene_object> host_objects;
     std::vector<int> light_indices;
     int image_width = 1280, image_height = 720;
-    int window_size_x = 856, window_size_y = window_size_x * (image_height*1.0 / image_width);
-    int window_offset_y = - image_height *  1.0/36;
-    int from_eye_to_window_distance = 555;
+    int window_size_x = 856, window_size_y = window_size_x * (image_height * 1.0 / image_width);
+    int window_offset_y = -image_height * 1.0 / 36;
+    int from_eye_to_window_distance = 365;
+    double glass_thickness = 0.05;
     // left wall
     host_objects.push_back({});
     host_objects.back().type = object_type::QUAD;
-    host_objects.back().quad_data = quad(
-        point3(origin.x() + window_size_x / 2, origin.y() - window_size_y / 2 + window_offset_y, origin.z()), 
-        vec3(0, window_size_y, 0), vec3(0, 0, from_eye_to_window_distance), 
-        /*material_id=*/material_id_map.at("green"));
+    host_objects.back().quad_data =
+        quad(point3(origin.x() + window_size_x / 2,
+                    origin.y() - window_size_y / 2 + window_offset_y, origin.z()),
+             vec3(0, window_size_y, 0), vec3(0, 0, from_eye_to_window_distance),
+             /*material_id=*/material_id_map.at("green"));
     // right wall
     host_objects.push_back({});
     host_objects.back().type = object_type::QUAD;
-    host_objects.back().quad_data = quad(
-        point3(origin.x() - window_size_x / 2, origin.y() - window_size_y / 2 + window_offset_y, origin.z()), 
-        vec3(0, 0, from_eye_to_window_distance), vec3(0, window_size_y, 0), 
-        /*material_id=*/material_id_map.at("red"));
-    
+    host_objects.back().quad_data =
+        quad(point3(origin.x() - window_size_x / 2,
+                    origin.y() - window_size_y / 2 + window_offset_y, origin.z()),
+             vec3(0, 0, from_eye_to_window_distance), vec3(0, window_size_y, 0),
+             /*material_id=*/material_id_map.at("green"));
+
     // light
     double light_size_scale = 1.0;
-    point3 light_size = point3(130, 0, 105) * light_size_scale;
-    point3 light_center(origin.x(), origin.y() + window_size_y / 2 + window_offset_y - 1, origin.z() + from_eye_to_window_distance * (222.0/555.0) - light_size.z() / 2);
+    point3 light_size = point3(130, 0, 52) * light_size_scale;
+    point3 light_center(origin.x(), origin.y() + window_size_y / 2 + window_offset_y - 1,
+                        origin.z() + from_eye_to_window_distance -
+                            from_eye_to_window_distance * 0.18 - light_size.z() / 2);
     host_objects.push_back({});
     host_objects.back().type = object_type::QUAD;
-    host_objects.back().quad_data = quad(
-        light_center + light_size / 2, 
-        vec3(-light_size.x(), 0, 0), vec3(0, 0, -light_size.z()), 
-        /*material_id=*/material_id_map.at("light"));
+    host_objects.back().quad_data = quad(light_center + light_size / 2, vec3(-light_size.x(), 0, 0),
+                                         vec3(0, 0, -light_size.z()),
+                                         /*material_id=*/material_id_map.at("light"));
 
     light_indices.push_back(host_objects.size() - 1);
 
     // floor
     host_objects.push_back({});
     host_objects.back().type = object_type::QUAD;
-    host_objects.back().quad_data = quad(
-        point3(origin.x() - window_size_x / 2, origin.y() - window_size_y / 2 + window_offset_y, origin.z()), 
-        vec3(0, 0, from_eye_to_window_distance), vec3(window_size_x, 0, 0),
-        /*material_id=*/material_id_map.at("white"));
-    
+    host_objects.back().quad_data =
+        quad(point3(origin.x() - window_size_x / 2,
+                    origin.y() - window_size_y / 2 + window_offset_y, origin.z()),
+             vec3(0, 0, from_eye_to_window_distance), vec3(window_size_x, 0, 0),
+             /*material_id=*/material_id_map.at("white"));
+
     // ceiling
     host_objects.push_back({});
     host_objects.back().type = object_type::QUAD;
-    host_objects.back().quad_data = quad(
-        point3(origin.x() - window_size_x / 2, origin.y() + window_size_y / 2 + window_offset_y, origin.z()),  
-        vec3(0, 0, from_eye_to_window_distance), vec3(window_size_x, 0, 0),
-        /*material_id=*/material_id_map.at("white"));
+    host_objects.back().quad_data =
+        quad(point3(origin.x() - window_size_x / 2,
+                    origin.y() + window_size_y / 2 + window_offset_y, origin.z()),
+             vec3(0, 0, from_eye_to_window_distance), vec3(window_size_x, 0, 0),
+             /*material_id=*/material_id_map.at("white"));
     host_objects.push_back({});
     // host_objects.back().type = object_type::QUAD;
-    // host_objects.back().quad_data = quad(point3(0, 0, 555), vec3(555, 0, 0), vec3(0, 555, 0), /*material_id=*/material_id_map.at("white"));
-    // host_objects.push_back({});
+    // host_objects.back().quad_data = quad(point3(0, 0, 555), vec3(555, 0, 0), vec3(0, 555, 0),
+    // /*material_id=*/material_id_map.at("white")); host_objects.push_back({});
     // host_objects.back().type = object_type::BOX;
-    // host_objects.back().box_data = box(point3(0, 0, 0), point3(165, 330, 165), /*material_id=*/material_id_map.at("white"), /*angle=*/15, /*offset=*/vec3(265, 0, 295));
+    // host_objects.back().box_data = box(point3(0, 0, 0), point3(165, 330, 165),
+    // /*material_id=*/material_id_map.at("white"), /*angle=*/15, /*offset=*/vec3(265, 0, 295));
     // host_objects.push_back({});
     // host_objects.back().type = object_type::SPHERE;
-    // host_objects.back().sphere_data = sphere(point3(190, 90, 190), 90, /*material_id=*/material_id_map.at("glass"));
-    // think glass slab in front of the camera.
+    // host_objects.back().sphere_data = sphere(point3(190, 90, 190), 90,
+    // /*material_id=*/material_id_map.at("glass"));
+
     // window
     host_objects.push_back({});
     host_objects.back().type = object_type::BOX;
-    host_objects.back().box_data = 
-        box(
-            point3(origin.x() - window_size_x / 2, origin.y() - window_size_y / 2 + window_offset_y, origin.z() + 554.95), 
-            point3(origin.x() + window_size_x / 2, origin.y() + window_size_y / 2 + window_offset_y, origin.z() + 555), 
-            /*material_id=*/material_id_map.at("white"),
-            /*angle=*/0,        
-            /*offset=*/vec3(0, 0, 0)
-        );
-    
-    
-   
+    host_objects.back().box_data =
+        box(point3(origin.x() - window_size_x / 2, origin.y() - window_size_y / 2 + window_offset_y,
+                   origin.z() + from_eye_to_window_distance - glass_thickness),
+            point3(origin.x() + window_size_x / 2, origin.y() + window_size_y / 2 + window_offset_y,
+                   origin.z() + from_eye_to_window_distance),
+            /*material_id=*/material_id_map.at("window_glass"),
+            /*angle=*/0,
+            /*offset=*/vec3(0, 0, 0));
+
     // BVH
     int actual_num_objects = host_objects.size();
     std::vector<int> prim_indices(actual_num_objects);
     std::iota(prim_indices.begin(), prim_indices.end(), 0);
     std::vector<bvh_node> host_bvh_nodes;
-    host_bvh_nodes.reserve(2*actual_num_objects-1);
-    int root_node_index = build_bvh(host_bvh_nodes, prim_indices, host_objects.data(), 0, actual_num_objects);
+    host_bvh_nodes.reserve(2 * actual_num_objects - 1);
+    int root_node_index =
+        build_bvh(host_bvh_nodes, prim_indices, host_objects.data(), 0, actual_num_objects);
 
     // animate camera
     double angle = t * 0.5;
-    double radius = 800.0;
-    point3 eye(origin.x() + radius * sin(angle), origin.y(), origin.z() -radius * cos(angle));
+    double radius = from_eye_to_window_distance;
+    point3 eye(origin.x(), origin.y() + window_offset_y, origin.z());
 
     camera cam;
-    cam.init(/*image_width=*/image_width, /*samples_per_pixel=*/100, /*max_depth=*/50, 
-        /*aspect_ratio=*/16.0/9.0, /*vfov=*/40, 
-        /*lookfrom=*/eye, /*lookat=*/origin, /*vup=*/vec3(0, 1, 0), 
-        /*defocus_angle=*/0.0, /*focus_dist=*/10, /*background=*/color(0.0, 0.0, 0.0));
-    cam.render(cam.image_width, cam.image_height, 
-        host_objects.data(), actual_num_objects,
-        /*host_textures=*/nullptr, /*num_textures=*/0,
-        host_materials.data(), host_materials.size(),
-        host_bvh_nodes.data(), host_bvh_nodes.size(), root_node_index, 
-        prim_indices.data(), actual_num_objects, light_indices.data(), light_indices.size(), /*frame=*/frame);
+    cam.init(/*image_width=*/image_width, /*samples_per_pixel=*/1000, /*max_depth=*/50,
+             /*aspect_ratio=*/16.0 / 9.0, /*vfov=*/90,
+             /*lookfrom=*/eye,
+             /*lookat=*/origin + vec3(0, window_offset_y, from_eye_to_window_distance),
+             /*vup=*/vec3(0, 1, 0),
+             /*defocus_angle=*/0.0, /*focus_dist=*/10, /*background=*/color(0.0, 0.0, 0.0));
+    cam.render(cam.image_width, cam.image_height, host_objects.data(), actual_num_objects,
+               /*host_textures=*/nullptr, /*num_textures=*/0, host_materials.data(),
+               host_materials.size(), host_bvh_nodes.data(), host_bvh_nodes.size(), root_node_index,
+               prim_indices.data(), actual_num_objects, light_indices.data(), light_indices.size(),
+               /*frame=*/frame);
 }
 
-int main(){
+int main() {
     int num_frames = 1;
     double fps = 30.0;
-    for(int frame = 0; frame < num_frames; ++frame) {
+    for (int frame = 0; frame < num_frames; ++frame) {
         double t = frame / fps;
         render_scene(t, frame);
         std::clog << "\rframe " << frame << " done" << std::flush;
