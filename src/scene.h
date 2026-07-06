@@ -7,6 +7,8 @@
 #include "quad.h"
 #include "box.h"
 #include "constant_medium.h"
+#include "cone.h"
+#include "cylinder.h"
 #include "interval.h"
 #include "bvh.h"
 
@@ -15,6 +17,8 @@ enum class object_type {
     QUAD,
     BOX,
     CONSTANT_MEDIUM,
+    CONE,
+    CYLINDER,
 };
 
 struct scene_object {
@@ -24,6 +28,8 @@ struct scene_object {
     quad quad_data;
     box box_data;
     constant_medium constant_medium_data;
+    cone cone_data;
+    cylinder cylinder_data;
 };
 
 inline void add_quad_transformed(scene_object* objects, int& object_index, const point3& Q,
@@ -45,6 +51,10 @@ D inline bool hit(const ray& r, interval ray_t, hit_record& rec, const scene_obj
             return object.box_data.hit(r, ray_t, rec);
         case object_type::CONSTANT_MEDIUM:
             return object.constant_medium_data.hit(r, ray_t, rec, state);
+        case object_type::CONE:
+            return object.cone_data.hit(r, ray_t, rec);
+        case object_type::CYLINDER:
+            return object.cylinder_data.hit(r, ray_t, rec);
         default:
             return false;
     }
@@ -60,6 +70,10 @@ HD aabb bounding_box(const scene_object& object) {
             return object.box_data.bounding_box();
         case object_type::CONSTANT_MEDIUM:
             return object.constant_medium_data.bounding_box();
+        case object_type::CONE:
+            return object.cone_data.bounding_box();
+        case object_type::CYLINDER:
+            return object.cylinder_data.bounding_box();
         default:
             return aabb(point3(0, 0, 0), point3(0, 0, 0));
     }
