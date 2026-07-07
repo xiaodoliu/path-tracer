@@ -273,6 +273,330 @@ void primitive_test_scene(double t, int frame) {
                /*frame=*/frame);
 }
 
+
+void render_window_tree_scene(double t, int frame) {
+    std::vector<material_data> host_materials;
+    std::unordered_map<std::string, int> material_id_map;
+
+    auto add_material = [&](const std::string& name, const material_data& mat) {
+        material_id_map[name] = static_cast<int>(host_materials.size());
+        host_materials.push_back(mat);
+    };
+
+    // ------------------------------------------------------------------
+    // Materials
+    // Adjust constructor fields if your material_data definition differs.
+    // ------------------------------------------------------------------
+
+    add_material("grass",
+        material_data{material_type::LAMBERTIAN, color(0.10, 0.20, 0.10)});
+
+    add_material("fence",
+        material_data{material_type::LAMBERTIAN, color(0.38, 0.30, 0.18)});
+
+    add_material("bark",
+        material_data{material_type::LAMBERTIAN, color(0.30, 0.22, 0.12)});
+
+    add_material("leaf",
+        material_data{material_type::LAMBERTIAN, color(0.08, 0.22, 0.10)});
+
+    add_material("lamp_post",
+        material_data{material_type::LAMBERTIAN, color(0.16, 0.16, 0.18)});
+
+    add_material("mountain",
+        material_data{material_type::LAMBERTIAN, color(0.05, 0.06, 0.08)});
+
+    add_material("window_frame",
+        material_data{material_type::LAMBERTIAN, color(0.22, 0.18, 0.12)});
+
+    add_material("lamp_light",
+        material_data{material_type::DIFFUSE_LIGHT, color(8.0, 7.2, 5.8)});
+
+    add_material("moon_light",
+        material_data{material_type::DIFFUSE_LIGHT, color(1.8, 1.9, 2.5)});
+
+    // Replace this with your exact dielectric constructor format.
+    add_material("window_glass",
+        material_data{
+            material_type::DIELECTRIC,
+            color(1.0, 1.0, 1.0),
+            -1,
+            0.0,
+            1.5
+        });
+
+    // ------------------------------------------------------------------
+    // Scene objects
+    // ------------------------------------------------------------------
+
+    std::vector<scene_object> host_objects;
+    std::vector<int> light_indices;
+
+    auto push_quad = [&](const point3& q, const vec3& u, const vec3& v, const std::string& mat) {
+        host_objects.push_back({});
+        host_objects.back().type = object_type::QUAD;
+        host_objects.back().quad_data = quad(q, u, v, material_id_map.at(mat));
+    };
+
+    auto push_box = [&](const point3& a, const point3& b, const std::string& mat) {
+        host_objects.push_back({});
+        host_objects.back().type = object_type::BOX;
+        host_objects.back().box_data = box(a, b, material_id_map.at(mat));
+    };
+
+    auto push_sphere = [&](const point3& c, double r, const std::string& mat, bool is_light=false) {
+        host_objects.push_back({});
+        host_objects.back().type = object_type::SPHERE;
+        host_objects.back().sphere_data = sphere(c, r, material_id_map.at(mat));
+        if (is_light) {
+            light_indices.push_back(static_cast<int>(host_objects.size()) - 1);
+        }
+    };
+
+    auto push_cylinder = [&](const point3& top_center, const point3& base_center,
+                             double r, const std::string& mat) {
+        host_objects.push_back({});
+        host_objects.back().type = object_type::CYLINDER;
+        host_objects.back().cylinder_data =
+            cylinder(top_center, base_center, r, material_id_map.at(mat));
+    };
+
+    auto push_cone = [&](const point3& apex, const point3& base_center,
+                         double r, const std::string& mat) {
+        host_objects.push_back({});
+        host_objects.back().type = object_type::CONE;
+        host_objects.back().cone_data =
+            cone(apex, base_center, r, material_id_map.at(mat));
+    };
+
+    // ------------------------------------------------------------------
+    // Coordinate plan
+    // camera roughly around z = 0, looking +z
+    // window just in front of camera
+    // outdoor scene farther in +z
+    // ------------------------------------------------------------------
+
+    const double ground_y = 0.0;
+    const double window_z = 2.0;
+
+    // ------------------------------------------------
+    // 1. Ground / garden
+    // ------------------------------------------------
+    push_quad(
+        point3(-14.0, ground_y, 4.0),
+        vec3(28.0, 0.0, 0.0),
+        vec3(0.0, 0.0, 42.0),
+        "grass"
+    );
+
+    // ------------------------------------------------
+    // 2. Window glass: use one QUAD, not a box
+    //    Important: choose u/v order so normal faces camera if needed.
+    // ------------------------------------------------
+    push_quad(
+        point3(-5.0, 1.0, window_z),
+        vec3(0.0, 7.0, 0.0),
+        vec3(10.0, 0.0, 0.0),
+        "window_glass"
+    );
+
+    // ------------------------------------------------
+    // 3. Window frame
+    // ------------------------------------------------
+    // left frame
+    push_box(point3(-5.25, 0.8, window_z - 0.05), point3(-5.0, 8.2, window_z + 0.05), "window_frame");
+    // right frame
+    push_box(point3( 5.0, 0.8, window_z - 0.05), point3( 5.25, 8.2, window_z + 0.05), "window_frame");
+    // bottom frame
+    push_box(point3(-5.25, 0.8, window_z - 0.05), point3( 5.25, 1.0, window_z + 0.05), "window_frame");
+    // top frame
+    push_box(point3(-5.25, 8.0, window_z - 0.05), point3( 5.25, 8.2, window_z + 0.05), "window_frame");
+
+    // Optional middle divider
+    push_box(point3(-0.08, 1.0, window_z - 0.05), point3(0.08, 8.0, window_z + 0.05), "window_frame");
+
+    // ------------------------------------------------
+    // 4. Fence
+    // ------------------------------------------------
+    double fence_z = 12.0;
+    double fence_h = 1.4;
+
+    // posts
+    for (int i = 0; i < 9; ++i) {
+        double x = -8.0 + i * 2.0;
+        push_box(
+            point3(x - 0.08, ground_y, fence_z - 0.08),
+            point3(x + 0.08, ground_y + fence_h, fence_z + 0.08),
+            "fence"
+        );
+    }
+
+    // rails
+    push_box(
+        point3(-8.2, ground_y + 0.45, fence_z - 0.05),
+        point3( 8.2, ground_y + 0.57, fence_z + 0.05),
+        "fence"
+    );
+
+    push_box(
+        point3(-8.2, ground_y + 1.00, fence_z - 0.05),
+        point3( 8.2, ground_y + 1.12, fence_z + 0.05),
+        "fence"
+    );
+
+    // ------------------------------------------------
+    // 5. Trees
+    // Use cylinder trunk + cone foliage
+    // ------------------------------------------------
+    auto add_tree = [&](double x, double z, double trunk_h, double trunk_r,
+                        double cone_base_y, double cone_h, double cone_r) {
+        push_cylinder(
+            point3(x, ground_y + trunk_h, z),
+            point3(x, ground_y, z),
+            trunk_r,
+            "bark"
+        );
+
+        // lower foliage cone
+        push_cone(
+            point3(x, ground_y + cone_base_y + cone_h, z),
+            point3(x, ground_y + cone_base_y, z),
+            cone_r,
+            "leaf"
+        );
+
+        // upper foliage cone
+        push_cone(
+            point3(x, ground_y + cone_base_y + cone_h + 1.2, z),
+            point3(x, ground_y + cone_base_y + 1.0, z),
+            cone_r * 0.75,
+            "leaf"
+        );
+    };
+
+    add_tree(-6.0, 18.0, 2.4, 0.18, 1.6, 2.6, 1.8);
+    add_tree(-1.5, 20.5, 2.8, 0.20, 1.9, 3.0, 2.0);
+    add_tree( 3.5, 17.0, 2.1, 0.16, 1.4, 2.4, 1.7);
+    add_tree( 7.0, 23.0, 3.0, 0.22, 2.0, 3.2, 2.2);
+
+    // ------------------------------------------------
+    // 6. Lamp on the right
+    // Use cylinder post + emissive sphere
+    // ------------------------------------------------
+    push_cylinder(
+        point3(8.5, ground_y + 4.0, 14.5),
+        point3(8.5, ground_y, 14.5),
+        0.10,
+        "lamp_post"
+    );
+
+    push_sphere(
+        point3(8.5, ground_y + 4.3, 14.5),
+        0.35,
+        "lamp_light",
+        true
+    );
+
+    // ------------------------------------------------
+    // 7. Moon in upper-left
+    // Use emissive sphere so your current PDF system can sample it.
+    // ------------------------------------------------
+    push_sphere(
+        point3(-10.0, 10.5, 36.0),
+        1.2,
+        "moon_light",
+        true
+    );
+
+    // ------------------------------------------------
+    // 8. Far mountains / silhouettes
+    // Simple stylized version using large dark boxes
+    // ------------------------------------------------
+    push_box(
+        point3(-16.0, ground_y, 30.0),
+        point3( -3.0, 5.0, 46.0),
+        "mountain"
+    );
+
+    push_box(
+        point3( -5.0, ground_y, 32.0),
+        point3(  8.0, 7.0, 47.0),
+        "mountain"
+    );
+
+    push_box(
+        point3(  6.0, ground_y, 31.0),
+        point3( 16.0, 4.5, 46.0),
+        "mountain"
+    );
+
+    // ------------------------------------------------
+    // 9. Optional: a few raindrops on the window
+    // Start with just a few large droplets.
+    // Later you can animate them.
+    // ------------------------------------------------
+    push_sphere(point3(-2.8, 6.4, window_z - 0.03), 0.16, "window_glass");
+    push_sphere(point3(-1.1, 4.7, window_z - 0.03), 0.12, "window_glass");
+    push_sphere(point3( 1.8, 5.8, window_z - 0.03), 0.14, "window_glass");
+    push_sphere(point3( 3.2, 3.6, window_z - 0.03), 0.10, "window_glass");
+
+    // ------------------------------------------------------------------
+    // BVH
+    // ------------------------------------------------------------------
+    int actual_num_objects = static_cast<int>(host_objects.size());
+
+    std::vector<int> prim_indices(actual_num_objects);
+    std::iota(prim_indices.begin(), prim_indices.end(), 0);
+
+    std::vector<bvh_node> host_bvh_nodes;
+    host_bvh_nodes.reserve(2 * actual_num_objects - 1);
+
+    int root_node_index = build_bvh(
+        host_bvh_nodes,
+        prim_indices,
+        host_objects.data(),
+        0,
+        actual_num_objects
+    );
+
+    // ------------------------------------------------------------------
+    // Camera
+    // ------------------------------------------------------------------
+    camera cam;
+    cam.init(
+        /*image_width=*/1280,
+        /*samples_per_pixel=*/200,
+        /*max_depth=*/30,
+        /*aspect_ratio=*/16.0 / 9.0,
+        /*vfov=*/40.0,
+        /*lookfrom=*/point3(0.0, 4.2, -2.5),
+        /*lookat=*/point3(0.0, 4.0, 16.0),
+        /*vup=*/vec3(0.0, 1.0, 0.0),
+        /*defocus_angle=*/0.0,
+        /*focus_dist=*/18.0,
+        /*background=*/color(0.04, 0.05, 0.09)
+    );
+
+    cam.render(
+        cam.image_width,
+        cam.image_height,
+        host_objects.data(),
+        actual_num_objects,
+        /*host_textures=*/nullptr,
+        /*num_textures=*/0,
+        host_materials.data(),
+        host_materials.size(),
+        host_bvh_nodes.data(),
+        host_bvh_nodes.size(),
+        root_node_index,
+        prim_indices.data(),
+        actual_num_objects,
+        light_indices.data(),
+        light_indices.size(),
+        frame
+    );
+}
+
 void render_scene(double t, int frame) {
     // anchor
     point3 origin(0, 0, 0);
@@ -480,7 +804,8 @@ int main() {
     double fps = 30.0;
     for (int frame = 0; frame < num_frames; ++frame) {
         double t = frame / fps;
-        primitive_test_scene(t, frame);
+        render_window_tree_scene(t, frame);
+        // primitive_test_scene(t, frame);
         // render_scene(t, frame);
         std::clog << "\rframe " << frame << " done" << std::flush;
     }
