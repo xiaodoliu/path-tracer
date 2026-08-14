@@ -6,6 +6,8 @@
 #include "material.h"
 #include "bvh.h"
 #include "pdf.h"
+#include "scenes/window_tree.h"
+#include "thunder.h"
 #include <cuda_runtime.h>
 #include <iostream>
 #include <vector>
@@ -13,6 +15,7 @@
 #include <string>
 
 #include <fstream>
+#include <filesystem>
 #include <sstream>
 #include <iomanip>
 
@@ -49,11 +52,12 @@ D color ray_color(const ray& r, int depth, const color& background,
         double pdf_val = 0.0;
         scattered =
             ray(rec.p,
-                mixture_pdf_generate(rec.p, rec.normal, device_objects, device_light_indices,
-                                     num_lights, srec.pdf_type, state),
+                mixture_pdf_generate(rec.p, srec.pdf_axis, device_objects, device_light_indices,
+                                     num_lights, srec.pdf_type, srec.anisotropy, state),
                 cur.time());
-        pdf_val = mixture_pdf_value(rec.p, scattered.direction(), rec.normal, device_objects,
-                                    device_light_indices, num_lights, srec.pdf_type);
+        pdf_val = mixture_pdf_value(rec.p, scattered.direction(), srec.pdf_axis, device_objects,
+                                    device_light_indices, num_lights, srec.pdf_type,
+                                    srec.anisotropy);
 
         if (pdf_val <= 0 || std::isnan(pdf_val)) {
             return radiance;
@@ -75,6 +79,167 @@ __global__ void init_rand_state(curandState* rand_states, int width, int height)
     curand_init(/*seed=*/19971122, pixel_index, 0, &rand_states[pixel_index]);
 }
 
+// CUDA equivalents of the small HLSL helpers used by Unity's Window shader.
+D inline float rain_saturate(float value) { return fminf(fmaxf(value, 0.0f), 1.0f); }
+
+D inline float rain_frac(float value) { return value - floorf(value); }
+
+D inline float rain_smoothstep(float edge0, float edge1, float value) {
+    float t = rain_saturate((value - edge0) / (edge1 - edge0));
+    return t * t * (3.0f - 2.0f * t);
+}
+
+D inline float rain_n21(float2 p) {
+    p.x = rain_frac(p.x * 123.34f);
+    p.y = rain_frac(p.y * 345.45f);
+    float offset = p.x * (p.x + 34.345f) + p.y * (p.y + 34.345f);
+    p.x += offset;
+    p.y += offset;
+    return rain_frac(p.x * p.y);
+}
+
+// Returns (distortion x, distortion y, wet-trail mask).
+D inline float3 rain_layer(float2 input_uv, float time, float size) {
+    float2 uv = make_float2(input_uv.x * size * 2.0f, input_uv.y * size);
+    uv.y += time * 0.25f;
+
+    float2 grid = make_float2(rain_frac(uv.x) - 0.5f, rain_frac(uv.y) - 0.5f);
+    float2 id = make_float2(floorf(uv.x), floorf(uv.y));
+    float n = rain_n21(id);
+
+    float layer_time = time + n * 2.0f * static_cast<float>(pi);
+    float w = input_uv.y * 10.0f;
+    float x = (n - 0.5f) * 0.8f;
+    x += (0.4f - fabsf(x)) * sinf(3.0f * w) * powf(sinf(w), 6.0f) * 0.45f;
+
+    float y = -sinf(layer_time + sinf(layer_time + sinf(layer_time) * 0.5f)) * 0.45f;
+    y -= (grid.x - x) * (grid.x - x);
+
+    // The Unity shader divides by aspect=(2,1).
+    float2 drop_pos = make_float2((grid.x - x) * 0.5f, grid.y - y);
+    float drop =
+        rain_smoothstep(0.05f, 0.03f, hypotf(drop_pos.x, drop_pos.y));
+
+    float2 trail_pos =
+        make_float2((grid.x - x) * 0.5f, grid.y - layer_time * 0.25f);
+    trail_pos.y = (rain_frac(trail_pos.y * 8.0f) - 0.5f) / 8.0f;
+    float trail =
+        rain_smoothstep(0.03f, 0.01f, hypotf(trail_pos.x, trail_pos.y));
+
+    float fog_trail = rain_smoothstep(-0.05f, 0.05f, drop_pos.y);
+    fog_trail *= rain_smoothstep(0.5f, y, grid.y);
+    trail *= fog_trail;
+    fog_trail *= rain_smoothstep(0.05f, 0.04f, fabsf(drop_pos.x));
+
+    return make_float3(drop * drop_pos.x + trail * trail_pos.x,
+                       drop * drop_pos.y + trail * trail_pos.y, fog_trail);
+}
+
+D inline unsigned char rain_read_channel(const unsigned char* image, int width, int height, int x,
+                                         int y, int channel) {
+    x = max(0, min(width - 1, x));
+    y = max(0, min(height - 1, y));
+    return image[(y * width + x) * 3 + channel];
+}
+
+// Unity's tex2D uses bilinear filtering. The renderer stores rows top-to-bottom,
+// whereas Unity screen UVs have their origin at the bottom-left.
+D inline float3 rain_sample_bilinear(const unsigned char* image, int width, int height, float2 uv) {
+    uv.x = rain_saturate(uv.x);
+    uv.y = rain_saturate(uv.y);
+
+    float pixel_x = uv.x * width - 0.5f;
+    float pixel_y = (1.0f - uv.y) * height - 0.5f;
+    int x0 = static_cast<int>(floorf(pixel_x));
+    int y0 = static_cast<int>(floorf(pixel_y));
+    float tx = pixel_x - x0;
+    float ty = pixel_y - y0;
+
+    float3 result = make_float3(0.0f, 0.0f, 0.0f);
+    for (int channel = 0; channel < 3; ++channel) {
+        float c00 = rain_read_channel(image, width, height, x0, y0, channel);
+        float c10 = rain_read_channel(image, width, height, x0 + 1, y0, channel);
+        float c01 = rain_read_channel(image, width, height, x0, y0 + 1, channel);
+        float c11 = rain_read_channel(image, width, height, x0 + 1, y0 + 1, channel);
+        float top = c00 + (c10 - c00) * tx;
+        float bottom = c01 + (c11 - c01) * tx;
+        float value = top + (bottom - top) * ty;
+        if (channel == 0) result.x = value;
+        if (channel == 1) result.y = value;
+        if (channel == 2) result.z = value;
+    }
+    return result;
+}
+
+__global__ void rainy_window_kernel(const unsigned char* input_image,
+                                    const unsigned char* window_mask,
+                                    unsigned char* output_image, int width, int height,
+                                    rain_settings rain) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+
+    int pixel = y * width + x;
+    int pixel_index = pixel * 3;
+    if (window_mask[pixel] == 0) {
+        output_image[pixel_index] = input_image[pixel_index];
+        output_image[pixel_index + 1] = input_image[pixel_index + 1];
+        output_image[pixel_index + 2] = input_image[pixel_index + 2];
+        return;
+    }
+
+    float2 uv = make_float2((x + 0.5f) / width, 1.0f - (y + 0.5f) / height);
+    float time = fmodf(rain.time + rain.time_offset, 7200.0f);
+
+    float3 drops = rain_layer(uv, time, rain.size);
+    float3 next = rain_layer(make_float2(uv.x * 1.23f + 7.54f, uv.y * 1.23f + 7.54f),
+                             time, rain.size);
+    drops.x += next.x;
+    drops.y += next.y;
+    drops.z += next.z;
+    next = rain_layer(make_float2(uv.x * 1.35f + 1.54f, uv.y * 1.35f + 1.54f), time,
+                      rain.size);
+    drops.x += next.x;
+    drops.y += next.y;
+    drops.z += next.z;
+    next = rain_layer(make_float2(uv.x * 1.57f - 7.54f, uv.y * 1.57f - 7.54f), time,
+                      rain.size);
+    drops.x += next.x;
+    drops.y += next.y;
+    drops.z += next.z;
+
+    // fwidth(uv.x) is approximately one pixel in normalized screen coordinates.
+    float fade = 1.0f - rain_saturate(60.0f / width);
+    float2 projected_uv =
+        make_float2(uv.x + drops.x * rain.distortion * fade,
+                    uv.y + drops.y * rain.distortion * fade);
+    float blur = rain.blur * 7.0f * (1.0f - drops.z) * 0.01f;
+
+    constexpr int sample_count = 32;
+    float angle = rain_n21(uv) * 2.0f * static_cast<float>(pi);
+    float3 color_sum = make_float3(0.0f, 0.0f, 0.0f);
+    for (int sample = 0; sample < sample_count; ++sample) {
+        float distance =
+            sqrtf(rain_frac(sinf((sample + 1) * 546.0f) * 5424.0f));
+        float2 offset =
+            make_float2(sinf(angle) * blur * distance, cosf(angle) * blur * distance);
+        float3 sample_color = rain_sample_bilinear(
+            input_image, width, height,
+            make_float2(projected_uv.x + offset.x, projected_uv.y + offset.y));
+        color_sum.x += sample_color.x;
+        color_sum.y += sample_color.y;
+        color_sum.z += sample_color.z;
+        angle += 1.0f;
+    }
+
+    output_image[pixel_index] =
+        static_cast<unsigned char>(rain_saturate(color_sum.x / (255.0f * sample_count)) * 255.0f);
+    output_image[pixel_index + 1] =
+        static_cast<unsigned char>(rain_saturate(color_sum.y / (255.0f * sample_count)) * 255.0f);
+    output_image[pixel_index + 2] =
+        static_cast<unsigned char>(rain_saturate(color_sum.z / (255.0f * sample_count)) * 255.0f);
+}
+
 __global__ void render_kernel(unsigned char* image, int width, int height, camera cam,
                               scene_object* device_objects, int num_objects,
                               texture_data* device_textures, int num_textures,
@@ -82,7 +247,8 @@ __global__ void render_kernel(unsigned char* image, int width, int height, camer
                               bvh_node* device_bvh_nodes, int num_bvh_nodes, int root_node_index,
                               int* device_prim_indices, int num_prim_indices,
                               int* device_light_indices, int num_lights,
-                              curandState* rand_states = nullptr) {
+                              curandState* rand_states = nullptr,
+                              unsigned char* window_mask = nullptr) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y * blockDim.y + threadIdx.y;
     if (i >= width || j >= height) return;
@@ -105,13 +271,26 @@ __global__ void render_kernel(unsigned char* image, int width, int height, camer
     }
     pixel_color /= (cam.sqrt_spp * cam.sqrt_spp * 1.0);
     write_color(image, pixel_index, pixel_color);
+
+    if (window_mask != nullptr) {
+        hit_record primary_rec;
+        ray primary_ray(cam.origin, pixel_center - cam.origin);
+        bool primary_hit =
+            hit_bvh(primary_ray, interval(0.001, infinity), primary_rec, device_bvh_nodes,
+                    device_prim_indices, device_objects, &local_rand_state);
+        window_mask[pixel_index / 3] =
+            primary_hit &&
+                    device_materials[primary_rec.material_id].receives_rain_post_process
+                ? 1
+                : 0;
+    }
 }
 
 void camera::render(int width, int height, scene_object* host_objects, int num_objects,
                     texture_data* host_textures, int num_textures, material_data* host_materials,
                     int num_materials, bvh_node* host_bvh_nodes, int num_bvh_nodes,
                     int root_node_index, int* prim_indices, int num_prim_indices,
-                    int* light_indices, int num_lights, int frame) {
+                    int* light_indices, int num_lights, const rain_settings& rain, int frame) {
     assert(width == this->image_width && height == this->image_height &&
            "Image dimensions must match camera dimensions");
     dim3 block_size = dim3(16, 16);
@@ -148,7 +327,7 @@ void camera::render(int width, int height, scene_object* host_objects, int num_o
     cudaMalloc(&device_bvh_nodes, num_bvh_nodes * sizeof(bvh_node));
     cudaMemcpy(device_bvh_nodes, host_bvh_nodes, num_bvh_nodes * sizeof(bvh_node),
                cudaMemcpyHostToDevice);
-    int* device_light_indices;
+    int* device_light_indices = nullptr;
     if (num_lights > 0) {
         assert(light_indices != nullptr && "Light indices must not be empty.");
         cudaMalloc(&device_light_indices, num_lights * sizeof(int));
@@ -156,16 +335,53 @@ void camera::render(int width, int height, scene_object* host_objects, int num_o
                    cudaMemcpyHostToDevice);
     }
 
+    bool use_post_processing_rain =
+        rain.mode == rain_mode::POST_PROCESSING || rain.mode == rain_mode::HYBRID;
+    unsigned char* window_mask = nullptr;
+    unsigned char* rainy_image = nullptr;
+    if (use_post_processing_rain) {
+        cudaMalloc(&window_mask, width * height * sizeof(unsigned char));
+        cudaMalloc(&rainy_image, image_size);
+    }
+
     render_kernel<<<grid_size, block_size>>>(
         image, width, height, *this, device_objects, num_objects, device_textures, num_textures,
         device_materials, num_materials, device_bvh_nodes, num_bvh_nodes, root_node_index,
-        device_prim_indices, num_prim_indices, device_light_indices, num_lights, rand_states);
+        device_prim_indices, num_prim_indices, device_light_indices, num_lights, rand_states,
+        window_mask);
     CUDA_CHECK(cudaGetLastError());
 
-    // Copy the image back to the host
     CUDA_CHECK(cudaDeviceSynchronize());
     std::vector<unsigned char> host_image(image_size);
-    cudaMemcpy(host_image.data(), image, image_size, cudaMemcpyDeviceToHost);
+    std::filesystem::create_directories("build/frames");
+
+    auto write_frame = [&](const unsigned char* device_image, int output_frame) {
+        CUDA_CHECK(
+            cudaMemcpy(host_image.data(), device_image, image_size, cudaMemcpyDeviceToHost));
+        std::ostringstream name;
+        name << "build/frames/frame_" << std::setw(4) << std::setfill('0') << output_frame
+             << ".ppm";
+        std::ofstream out(name.str());
+        write_image(out, host_image, width, height);
+        std::clog << "\rframe " << output_frame << " done" << std::flush;
+    };
+
+    if (use_post_processing_rain) {
+        int frame_count = max(1, rain.frame_count);
+        float fps = fmaxf(rain.frames_per_second, 0.001f);
+        for (int animation_frame = 0; animation_frame < frame_count; ++animation_frame) {
+            rain_settings animated_rain = rain;
+            animated_rain.time =
+                rain.time + animation_frame * rain.time_scale / fps;
+            rainy_window_kernel<<<grid_size, block_size>>>(image, window_mask, rainy_image, width,
+                                                           height, animated_rain);
+            CUDA_CHECK(cudaGetLastError());
+            CUDA_CHECK(cudaDeviceSynchronize());
+            write_frame(rainy_image, frame + animation_frame);
+        }
+    } else {
+        write_frame(image, frame);
+    }
 
     // Free the device memory
     cudaFree(device_objects);
@@ -174,640 +390,145 @@ void camera::render(int width, int height, scene_object* host_objects, int num_o
     cudaFree(device_bvh_nodes);
     cudaFree(device_prim_indices);
     cudaFree(device_light_indices);
+    cudaFree(window_mask);
+    cudaFree(rainy_image);
     cudaFree(image);
     cudaFree(rand_states);
-
-    std::ostringstream name;
-    name << "build/frames/frame_" << std::setw(4) << std::setfill('0') << frame << ".ppm";
-    std::ofstream out(name.str());
-    write_image(out, host_image, width, height);
 }
 
-void primitive_test_scene(double t, int frame) {
-    // Materials
-    std::vector<material_data> host_materials;
+int main(int argc, char** argv) {
+    rain_settings rain;
+    cloud_settings clouds;
+    lightning_settings lightning;
+    rain.mode = rain_mode::POST_PROCESSING;
+    rain.size = 3.7f;
+    rain.distortion = -5.0f;
+    rain.blur = 0.05f;
 
-    int ground_mat = host_materials.size();
-    host_materials.push_back(material_data{material_type::LAMBERTIAN, color(0.55, 0.55, 0.55)});
-
-    int cylinder_mat = host_materials.size();
-    host_materials.push_back(material_data{material_type::LAMBERTIAN, color(0.85, 0.20, 0.15)});
-
-    int cone_mat = host_materials.size();
-    host_materials.push_back(material_data{material_type::LAMBERTIAN, color(0.15, 0.35, 0.90)});
-
-    int light_mat = host_materials.size();
-    host_materials.push_back(material_data{material_type::DIFFUSE_LIGHT, color(8.0, 8.0, 8.0)});
-
-    // Objects
-    std::vector<scene_object> host_objects;
-    std::vector<int> light_indices;
-
-    // Ground
-    host_objects.push_back({});
-    host_objects.back().type = object_type::QUAD;
-    host_objects.back().quad_data =
-        quad(point3(-5, 0, -5), vec3(10, 0, 0), vec3(0, 0, 10), ground_mat);
-
-    // Area light above the objects
-    host_objects.push_back({});
-    host_objects.back().type = object_type::QUAD;
-    host_objects.back().quad_data =
-        quad(point3(-2, 5, -2), vec3(4, 0, 0), vec3(0, 0, 4), light_mat);
-    light_indices.push_back(host_objects.size() - 1);
-
-    // Vertical cylinder on the left
-    host_objects.push_back({});
-    host_objects.back().type = object_type::CYLINDER;
-    host_objects.back().cylinder_data = cylinder(/*top_center=*/point3(-1.5, 2.5, 0),
-                                                 /*base_center=*/point3(-1.5, 0.0, 0),
-                                                 /*radius=*/0.45,
-                                                 /*material_id=*/cylinder_mat);
-
-    // Vertical cone on the right
-    host_objects.push_back({});
-    host_objects.back().type = object_type::CONE;
-    host_objects.back().cone_data = cone(/*apex=*/point3(1.5, 2.5, 0),
-                                         /*base_center=*/point3(1.5, 0.0, 0),
-                                         /*radius=*/0.65,
-                                         /*material_id=*/cone_mat);
-
-    // Optional: tilted cylinder to test arbitrary-axis cylinder
-    host_objects.push_back({});
-    host_objects.back().type = object_type::CYLINDER;
-    host_objects.back().cylinder_data = cylinder(/*top_center=*/point3(0.0, 2.8, -1.4),
-                                                 /*base_center=*/point3(-0.8, 0.4, -1.4),
-                                                 /*radius=*/0.25,
-                                                 /*material_id=*/cylinder_mat);
-
-    // BVH
-    int actual_num_objects = host_objects.size();
-
-    std::vector<int> prim_indices(actual_num_objects);
-    std::iota(prim_indices.begin(), prim_indices.end(), 0);
-
-    std::vector<bvh_node> host_bvh_nodes;
-    host_bvh_nodes.reserve(2 * actual_num_objects - 1);
-
-    int root_node_index =
-        build_bvh(host_bvh_nodes, prim_indices, host_objects.data(), 0, actual_num_objects);
-
-    // Camera
-    camera cam;
-    cam.init(/*image_width=*/800,
-             /*samples_per_pixel=*/100,
-             /*max_depth=*/20,
-             /*aspect_ratio=*/16.0 / 9.0,
-             /*vfov=*/35,
-             /*lookfrom=*/point3(0, 2.0, 7.0),
-             /*lookat=*/point3(0, 1.2, 0),
-             /*vup=*/vec3(0, 1, 0),
-             /*defocus_angle=*/0.0,
-             /*focus_dist=*/10.0,
-             /*background=*/color(0.02, 0.03, 0.05));
-
-    cam.render(cam.image_width, cam.image_height, host_objects.data(), actual_num_objects,
-               /*host_textures=*/nullptr, /*num_textures=*/0, host_materials.data(),
-               host_materials.size(), host_bvh_nodes.data(), host_bvh_nodes.size(), root_node_index,
-               prim_indices.data(), actual_num_objects, light_indices.data(), light_indices.size(),
-               /*frame=*/frame);
-}
-
-
-void render_window_tree_scene(double t, int frame) {
-    std::vector<material_data> host_materials;
-    std::unordered_map<std::string, int> material_id_map;
-
-    auto add_material = [&](const std::string& name, const material_data& mat) {
-        material_id_map[name] = static_cast<int>(host_materials.size());
-        host_materials.push_back(mat);
+    int start_frame = 0;
+    auto print_usage = [&]() {
+        std::cout
+            << "Usage: " << argv[0]
+            << " [--frames N] [--fps N] [--start-frame N] [--time-scale N]"
+               " [--clouds] [--cloud-speed N] [--cloud-density N]"
+               " [--cloud-start-x N] [--lightning] [--lightning-first N]"
+               " [--lightning-interval N] [--lightning-intensity N]"
+               " [--lightning-seed N] [--thunder-delay N] [--thunder-volume N]"
+               " [--no-thunder] [--no-rain]\n";
     };
 
-    // ------------------------------------------------------------------
-    // Materials
-    // Adjust constructor fields if your material_data definition differs.
-    // ------------------------------------------------------------------
-
-    add_material("grass",
-        material_data{material_type::LAMBERTIAN, color(0.10, 0.20, 0.10)});
-
-    add_material("fence",
-        material_data{material_type::LAMBERTIAN, color(0.38, 0.30, 0.18)});
-
-    add_material("bark",
-        material_data{material_type::LAMBERTIAN, color(0.30, 0.22, 0.12)});
-
-    add_material("leaf",
-        material_data{material_type::LAMBERTIAN, color(0.08, 0.22, 0.10)});
-
-    add_material("lamp_post",
-        material_data{material_type::LAMBERTIAN, color(0.16, 0.16, 0.18)});
-
-    add_material("mountain",
-        material_data{material_type::LAMBERTIAN, color(0.05, 0.06, 0.08)});
-
-    add_material("window_frame",
-        material_data{material_type::LAMBERTIAN, color(0.22, 0.18, 0.12)});
-
-    add_material("lamp_light",
-        material_data{material_type::DIFFUSE_LIGHT, color(8.0, 7.2, 5.8)});
-
-    add_material("moon_light",
-        material_data{material_type::DIFFUSE_LIGHT, color(1.8, 1.9, 2.5)});
-
-    // Replace this with your exact dielectric constructor format.
-    add_material("window_glass",
-        material_data{
-            material_type::DIELECTRIC,
-            color(1.0, 1.0, 1.0),
-            -1,
-            0.0,
-            1.5
-        });
-
-    // ------------------------------------------------------------------
-    // Scene objects
-    // ------------------------------------------------------------------
-
-    std::vector<scene_object> host_objects;
-    std::vector<int> light_indices;
-
-    auto push_quad = [&](const point3& q, const vec3& u, const vec3& v, const std::string& mat) {
-        host_objects.push_back({});
-        host_objects.back().type = object_type::QUAD;
-        host_objects.back().quad_data = quad(q, u, v, material_id_map.at(mat));
-    };
-
-    auto push_box = [&](const point3& a, const point3& b, const std::string& mat) {
-        host_objects.push_back({});
-        host_objects.back().type = object_type::BOX;
-        host_objects.back().box_data = box(a, b, material_id_map.at(mat));
-    };
-
-    auto push_sphere = [&](const point3& c, double r, const std::string& mat, bool is_light=false) {
-        host_objects.push_back({});
-        host_objects.back().type = object_type::SPHERE;
-        host_objects.back().sphere_data = sphere(c, r, material_id_map.at(mat));
-        if (is_light) {
-            light_indices.push_back(static_cast<int>(host_objects.size()) - 1);
+    try {
+        for (int arg = 1; arg < argc; ++arg) {
+            std::string option = argv[arg];
+            if (option == "--help" || option == "-h") {
+                print_usage();
+                return 0;
+            }
+            if (option == "--clouds") {
+                clouds.enabled = true;
+                continue;
+            }
+            if (option == "--no-rain") {
+                rain.mode = rain_mode::NONE;
+                continue;
+            }
+            if (option == "--lightning") {
+                lightning.enabled = true;
+                continue;
+            }
+            if (option == "--no-thunder") {
+                lightning.thunder_enabled = false;
+                continue;
+            }
+            if (arg + 1 >= argc) {
+                throw std::invalid_argument("missing value for " + option);
+            }
+            std::string value = argv[++arg];
+            if (option == "--frames") {
+                rain.frame_count = std::stoi(value);
+            } else if (option == "--fps") {
+                rain.frames_per_second = std::stof(value);
+            } else if (option == "--start-frame") {
+                start_frame = std::stoi(value);
+            } else if (option == "--time-scale") {
+                rain.time_scale = std::stof(value);
+            } else if (option == "--cloud-speed") {
+                clouds.enabled = true;
+                clouds.speed = std::stod(value);
+            } else if (option == "--cloud-density") {
+                clouds.enabled = true;
+                clouds.density = std::stod(value);
+            } else if (option == "--cloud-start-x") {
+                clouds.enabled = true;
+                clouds.start_x = std::stod(value);
+            } else if (option == "--lightning-first") {
+                lightning.enabled = true;
+                lightning.first_strike = std::stod(value);
+            } else if (option == "--lightning-interval") {
+                lightning.enabled = true;
+                lightning.interval = std::stod(value);
+            } else if (option == "--lightning-intensity") {
+                lightning.enabled = true;
+                lightning.intensity = std::stod(value);
+            } else if (option == "--lightning-seed") {
+                lightning.enabled = true;
+                lightning.seed = static_cast<std::uint32_t>(std::stoul(value));
+            } else if (option == "--thunder-delay") {
+                lightning.enabled = true;
+                lightning.thunder_delay = std::stod(value);
+            } else if (option == "--thunder-volume") {
+                lightning.enabled = true;
+                lightning.thunder_volume = std::stod(value);
+            } else {
+                throw std::invalid_argument("unknown option: " + option);
+            }
         }
-    };
-
-    auto push_cylinder = [&](const point3& top_center, const point3& base_center,
-                             double r, const std::string& mat) {
-        host_objects.push_back({});
-        host_objects.back().type = object_type::CYLINDER;
-        host_objects.back().cylinder_data =
-            cylinder(top_center, base_center, r, material_id_map.at(mat));
-    };
-
-    auto push_cone = [&](const point3& apex, const point3& base_center,
-                         double r, const std::string& mat) {
-        host_objects.push_back({});
-        host_objects.back().type = object_type::CONE;
-        host_objects.back().cone_data =
-            cone(apex, base_center, r, material_id_map.at(mat));
-    };
-
-    // ------------------------------------------------------------------
-    // Coordinate plan
-    // camera roughly around z = 0, looking +z
-    // window just in front of camera
-    // outdoor scene farther in +z
-    // ------------------------------------------------------------------
-
-    const double ground_y = 0.0;
-    const double window_z = 2.0;
-
-    // ------------------------------------------------
-    // 1. Ground / garden
-    // ------------------------------------------------
-    push_quad(
-        point3(-14.0, ground_y, 4.0),
-        vec3(28.0, 0.0, 0.0),
-        vec3(0.0, 0.0, 42.0),
-        "grass"
-    );
-
-    // ------------------------------------------------
-    // 2. Window glass: use one QUAD, not a box
-    //    Important: choose u/v order so normal faces camera if needed.
-    // ------------------------------------------------
-    push_quad(
-        point3(-5.0, 1.0, window_z),
-        vec3(0.0, 7.0, 0.0),
-        vec3(10.0, 0.0, 0.0),
-        "window_glass"
-    );
-
-    // ------------------------------------------------
-    // 3. Window frame
-    // ------------------------------------------------
-    // left frame
-    push_box(point3(-5.25, 0.8, window_z - 0.05), point3(-5.0, 8.2, window_z + 0.05), "window_frame");
-    // right frame
-    push_box(point3( 5.0, 0.8, window_z - 0.05), point3( 5.25, 8.2, window_z + 0.05), "window_frame");
-    // bottom frame
-    push_box(point3(-5.25, 0.8, window_z - 0.05), point3( 5.25, 1.0, window_z + 0.05), "window_frame");
-    // top frame
-    push_box(point3(-5.25, 8.0, window_z - 0.05), point3( 5.25, 8.2, window_z + 0.05), "window_frame");
-
-    // Optional middle divider
-    push_box(point3(-0.08, 1.0, window_z - 0.05), point3(0.08, 8.0, window_z + 0.05), "window_frame");
-
-    // ------------------------------------------------
-    // 4. Fence
-    // ------------------------------------------------
-    double fence_z = 12.0;
-    double fence_h = 1.4;
-
-    // posts
-    for (int i = 0; i < 9; ++i) {
-        double x = -8.0 + i * 2.0;
-        push_box(
-            point3(x - 0.08, ground_y, fence_z - 0.08),
-            point3(x + 0.08, ground_y + fence_h, fence_z + 0.08),
-            "fence"
-        );
+    } catch (const std::exception& error) {
+        std::cerr << "Argument error: " << error.what() << '\n';
+        print_usage();
+        return 1;
     }
 
-    // rails
-    push_box(
-        point3(-8.2, ground_y + 0.45, fence_z - 0.05),
-        point3( 8.2, ground_y + 0.57, fence_z + 0.05),
-        "fence"
-    );
-
-    push_box(
-        point3(-8.2, ground_y + 1.00, fence_z - 0.05),
-        point3( 8.2, ground_y + 1.12, fence_z + 0.05),
-        "fence"
-    );
-
-    // ------------------------------------------------
-    // 5. Trees
-    // Use cylinder trunk + cone foliage
-    // ------------------------------------------------
-    auto add_tree = [&](double x, double z, double trunk_h, double trunk_r,
-                        double cone_base_y, double cone_h, double cone_r) {
-        push_cylinder(
-            point3(x, ground_y + trunk_h, z),
-            point3(x, ground_y, z),
-            trunk_r,
-            "bark"
-        );
-
-        // lower foliage cone
-        push_cone(
-            point3(x, ground_y + cone_base_y + cone_h, z),
-            point3(x, ground_y + cone_base_y, z),
-            cone_r,
-            "leaf"
-        );
-
-        // upper foliage cone
-        push_cone(
-            point3(x, ground_y + cone_base_y + cone_h + 1.2, z),
-            point3(x, ground_y + cone_base_y + 1.0, z),
-            cone_r * 0.75,
-            "leaf"
-        );
-    };
-
-    add_tree(-6.0, 18.0, 2.4, 0.18, 1.6, 2.6, 1.8);
-    add_tree(-1.5, 20.5, 2.8, 0.20, 1.9, 3.0, 2.0);
-    add_tree( 3.5, 17.0, 2.1, 0.16, 1.4, 2.4, 1.7);
-    add_tree( 7.0, 23.0, 3.0, 0.22, 2.0, 3.2, 2.2);
-
-    // ------------------------------------------------
-    // 6. Lamp on the right
-    // Use cylinder post + emissive sphere
-    // ------------------------------------------------
-    push_cylinder(
-        point3(8.5, ground_y + 4.0, 14.5),
-        point3(8.5, ground_y, 14.5),
-        0.10,
-        "lamp_post"
-    );
-
-    push_sphere(
-        point3(8.5, ground_y + 4.3, 14.5),
-        0.35,
-        "lamp_light",
-        true
-    );
-
-    // ------------------------------------------------
-    // 7. Moon in upper-left
-    // Use emissive sphere so your current PDF system can sample it.
-    // ------------------------------------------------
-    push_sphere(
-        point3(-10.0, 10.5, 36.0),
-        1.2,
-        "moon_light",
-        true
-    );
-
-    // ------------------------------------------------
-    // 8. Far mountains / silhouettes
-    // Simple stylized version using large dark boxes
-    // ------------------------------------------------
-    push_box(
-        point3(-16.0, ground_y, 30.0),
-        point3( -3.0, 5.0, 46.0),
-        "mountain"
-    );
-
-    push_box(
-        point3( -5.0, ground_y, 32.0),
-        point3(  8.0, 7.0, 47.0),
-        "mountain"
-    );
-
-    push_box(
-        point3(  6.0, ground_y, 31.0),
-        point3( 16.0, 4.5, 46.0),
-        "mountain"
-    );
-
-    // ------------------------------------------------
-    // 9. Optional: a few raindrops on the window
-    // Start with just a few large droplets.
-    // Later you can animate them.
-    // ------------------------------------------------
-    push_sphere(point3(-2.8, 6.4, window_z - 0.03), 0.16, "window_glass");
-    push_sphere(point3(-1.1, 4.7, window_z - 0.03), 0.12, "window_glass");
-    push_sphere(point3( 1.8, 5.8, window_z - 0.03), 0.14, "window_glass");
-    push_sphere(point3( 3.2, 3.6, window_z - 0.03), 0.10, "window_glass");
-
-    // ------------------------------------------------------------------
-    // BVH
-    // ------------------------------------------------------------------
-    int actual_num_objects = static_cast<int>(host_objects.size());
-
-    std::vector<int> prim_indices(actual_num_objects);
-    std::iota(prim_indices.begin(), prim_indices.end(), 0);
-
-    std::vector<bvh_node> host_bvh_nodes;
-    host_bvh_nodes.reserve(2 * actual_num_objects - 1);
-
-    int root_node_index = build_bvh(
-        host_bvh_nodes,
-        prim_indices,
-        host_objects.data(),
-        0,
-        actual_num_objects
-    );
-
-    // ------------------------------------------------------------------
-    // Camera
-    // ------------------------------------------------------------------
-    camera cam;
-    cam.init(
-        /*image_width=*/1280,
-        /*samples_per_pixel=*/200,
-        /*max_depth=*/30,
-        /*aspect_ratio=*/16.0 / 9.0,
-        /*vfov=*/40.0,
-        /*lookfrom=*/point3(0.0, 4.2, -2.5),
-        /*lookat=*/point3(0.0, 4.0, 16.0),
-        /*vup=*/vec3(0.0, 1.0, 0.0),
-        /*defocus_angle=*/0.0,
-        /*focus_dist=*/18.0,
-        /*background=*/color(0.04, 0.05, 0.09)
-    );
-
-    cam.render(
-        cam.image_width,
-        cam.image_height,
-        host_objects.data(),
-        actual_num_objects,
-        /*host_textures=*/nullptr,
-        /*num_textures=*/0,
-        host_materials.data(),
-        host_materials.size(),
-        host_bvh_nodes.data(),
-        host_bvh_nodes.size(),
-        root_node_index,
-        prim_indices.data(),
-        actual_num_objects,
-        light_indices.data(),
-        light_indices.size(),
-        frame
-    );
-}
-
-void render_scene(double t, int frame) {
-    // anchor
-    point3 origin(0, 0, 0);
-
-    // Material
-    std::vector<material_data> host_materials;
-    std::unordered_map<std::string, int> material_id_map;
-
-    host_materials.push_back(
-        material_data{material_type::LAMBERTIAN, color(.65, .05, .05)});  // red
-    material_id_map["red"] = host_materials.size() - 1;
-    host_materials.push_back(
-        material_data{material_type::LAMBERTIAN, color(0.73, 0.73, 0.73)});  // white
-    material_id_map["white"] = host_materials.size() - 1;
-    host_materials.push_back(
-        material_data{material_type::LAMBERTIAN, color(0.0, 1.0, 0.0)});  // green
-    material_id_map["green"] = host_materials.size() - 1;
-    host_materials.push_back(
-        material_data{material_type::DIFFUSE_LIGHT, color(10, 10, 10)});  // light
-    material_id_map["light"] = host_materials.size() - 1;
-    host_materials.push_back(material_data{material_type::DIELECTRIC, color(1.0, 1.0, 1.0),
-                                           /*texture_id=*/-1, /*fuzz=*/0.0,
-                                           /*refraction_index=*/1.5});  // glass
-    material_id_map["glass"] = host_materials.size() - 1;
-    host_materials.push_back(material_data{material_type::DIELECTRIC, color(1.0, 1.0, 1.0),
-                                           /*texture_id=*/-1, /*fuzz=*/0.0,
-                                           /*refraction_index=*/1.45});  // window glass
-    material_id_map["window_glass"] = host_materials.size() - 1;
-
-    host_materials.push_back(material_data{material_type::DIFFUSE_LIGHT, color(0.08, 0.1, 0.18)});
-    material_id_map["night_sky"] = host_materials.size() - 1;
-
-    host_materials.push_back(material_data{material_type::LAMBERTIAN, color(0.18, 0.18, 0.2)});
-    material_id_map["wet_road"] = host_materials.size() - 1;
-
-    host_materials.push_back(material_data{material_type::LAMBERTIAN, color(0.1, 0.11, 0.14)});
-    material_id_map["building_dark"] = host_materials.size() - 1;
-
-    host_materials.push_back(material_data{material_type::DIFFUSE_LIGHT, color(8.0, 6.5, 3.5)});
-    material_id_map["street_lamp_light"] = host_materials.size() - 1;
-
-    host_materials.push_back(material_data{material_type::LAMBERTIAN, color(0.08, 0.08, 0.08)});
-    material_id_map["lamp_post"] = host_materials.size() - 1;
-
-    // Objects
-    std::vector<scene_object> host_objects;
-    std::vector<int> light_indices;
-    int image_width = 1280, image_height = 720;
-    int window_size_x = 856, window_size_y = window_size_x * (image_height * 1.0 / image_width);
-    int window_offset_y = -image_height * 1.0 / 36;
-    int from_eye_to_window_distance = 365;
-    double glass_thickness = 0.05;
-    double window_z = origin.z() + from_eye_to_window_distance;
-    double outside_z = window_z + 1.0;
-
-    // left wall
-    host_objects.push_back({});
-    host_objects.back().type = object_type::QUAD;
-    host_objects.back().quad_data =
-        quad(point3(origin.x() + window_size_x / 2,
-                    origin.y() - window_size_y / 2 + window_offset_y, origin.z()),
-             vec3(0, window_size_y, 0), vec3(0, 0, from_eye_to_window_distance),
-             /*material_id=*/material_id_map.at("green"));
-    // right wall
-    host_objects.push_back({});
-    host_objects.back().type = object_type::QUAD;
-    host_objects.back().quad_data =
-        quad(point3(origin.x() - window_size_x / 2,
-                    origin.y() - window_size_y / 2 + window_offset_y, origin.z()),
-             vec3(0, 0, from_eye_to_window_distance), vec3(0, window_size_y, 0),
-             /*material_id=*/material_id_map.at("green"));
-
-    // light
-    double light_size_scale = 1.0;
-    point3 light_size = point3(130, 0, 52) * light_size_scale;
-    point3 light_center(origin.x(), origin.y() + window_size_y / 2 + window_offset_y - 1,
-                        origin.z() + from_eye_to_window_distance -
-                            from_eye_to_window_distance * 0.18 - light_size.z() / 2);
-    host_objects.push_back({});
-    host_objects.back().type = object_type::QUAD;
-    host_objects.back().quad_data = quad(light_center + light_size / 2, vec3(-light_size.x(), 0, 0),
-                                         vec3(0, 0, -light_size.z()),
-                                         /*material_id=*/material_id_map.at("light"));
-
-    light_indices.push_back(host_objects.size() - 1);
-
-    // floor
-    host_objects.push_back({});
-    host_objects.back().type = object_type::QUAD;
-    host_objects.back().quad_data =
-        quad(point3(origin.x() - window_size_x / 2,
-                    origin.y() - window_size_y / 2 + window_offset_y, origin.z()),
-             vec3(0, 0, from_eye_to_window_distance), vec3(window_size_x, 0, 0),
-             /*material_id=*/material_id_map.at("white"));
-
-    // ceiling
-    host_objects.push_back({});
-    host_objects.back().type = object_type::QUAD;
-    host_objects.back().quad_data =
-        quad(point3(origin.x() - window_size_x / 2,
-                    origin.y() + window_size_y / 2 + window_offset_y, origin.z()),
-             vec3(0, 0, from_eye_to_window_distance), vec3(window_size_x, 0, 0),
-             /*material_id=*/material_id_map.at("white"));
-    // host_objects.push_back({});
-    // host_objects.back().type = object_type::QUAD;
-    // host_objects.back().quad_data = quad(point3(0, 0, 555), vec3(555, 0, 0), vec3(0, 555, 0),
-    // /*material_id=*/material_id_map.at("white")); host_objects.push_back({});
-    // host_objects.back().type = object_type::BOX;
-    // host_objects.back().box_data = box(point3(0, 0, 0), point3(165, 330, 165),
-    // /*material_id=*/material_id_map.at("white"), /*angle=*/15, /*offset=*/vec3(265, 0, 295));
-    // host_objects.push_back({});
-    // host_objects.back().type = object_type::SPHERE;
-    // host_objects.back().sphere_data = sphere(point3(190, 90, 190), 90,
-    // /*material_id=*/material_id_map.at("glass"));
-
-    // window
-    host_objects.push_back({});
-    host_objects.back().type = object_type::BOX;
-    host_objects.back().box_data =
-        box(point3(origin.x() - window_size_x / 2, origin.y() - window_size_y / 2 + window_offset_y,
-                   origin.z() + from_eye_to_window_distance - glass_thickness),
-            point3(origin.x() + window_size_x / 2, origin.y() + window_size_y / 2 + window_offset_y,
-                   origin.z() + from_eye_to_window_distance),
-            /*material_id=*/material_id_map.at("window_glass"),
-            /*angle=*/0,
-            /*offset=*/vec3(0, 0, 0));
-
-    // far sky
-    host_objects.push_back({});
-    host_objects.back().type = object_type::QUAD;
-    host_objects.back().quad_data =
-        quad(point3(origin.x() - 2000, origin.y() - 1000, window_z + 1200), vec3(0, 2000, 0),
-             vec3(4000, 0, 0), material_id_map.at("night_sky"));
-
-    // road
-    double road_y = origin.y() - window_size_y / 2 + window_offset_y - 20;
-    double road_z = window_z + 20;
-
-    host_objects.push_back({});
-    host_objects.back().type = object_type::QUAD;
-    host_objects.back().quad_data =
-        quad(point3(origin.x() - 1000, road_y, road_z), vec3(0, 0, 1400), vec3(2000, 0, 0),
-             material_id_map.at("wet_road"));
-
-    // building silhouettes
-    for (int i = 0; i < 5; ++i) {
-        double x0 = -700 + i * 300;
-        double h = 250 + 80 * (i % 3);
-        host_objects.push_back({});
-        host_objects.back().type = object_type::BOX;
-        host_objects.back().box_data = box(point3(x0, origin.y() - 250, window_z + 700),
-                                           point3(x0 + 180, origin.y() - 250 + h, window_z + 760),
-                                           material_id_map.at("building_dark"));
+    if (rain.frame_count < 1 || rain.frames_per_second <= 0.0f || start_frame < 0 ||
+        clouds.speed < 0.0 || clouds.density <= 0.0 || lightning.first_strike < 0.0 ||
+        lightning.interval <= 0.0 || lightning.intensity <= 0.0 ||
+        lightning.thunder_delay < 0.0 || lightning.thunder_volume < 0.0) {
+        std::cerr << "Frames, FPS, and cloud density must be positive; start frame and cloud "
+                     "speed cannot be negative. Lightning timing, intensity, and thunder "
+                     "settings must also be valid.\n";
+        return 1;
     }
 
-    // street lamps
-    for (int i = 0; i < 3; ++i) {
-        double z = window_z + 180 + i * 250;
-        double x = -250 + i * 220;
-        // lamp post
-        host_objects.push_back({});
-        host_objects.back().type = object_type::BOX;
-        host_objects.back().box_data =
-            box(point3(x, road_y, z), point3(x + 12, road_y + 330, z + 12),
-                material_id_map.at("lamp_post"));
-
-        // lamp bulb
-        host_objects.push_back({});
-        host_objects.back().type = object_type::SPHERE;
-        host_objects.back().sphere_data =
-            sphere(point3(x + 6, road_y + 360, z + 6), 25, material_id_map.at("street_lamp_light"));
-        light_indices.push_back(host_objects.size() - 1);
+    int requested_frames = rain.frame_count;
+    bool dynamic_scene = clouds.enabled || lightning.enabled;
+    if (dynamic_scene) {
+        // Moving clouds and lightning change geometry or illumination, so each
+        // frame needs a new BVH and path-traced base image. Rain remains a
+        // post-process applied once to each newly rendered frame.
+        rain.frame_count = 1;
+        for (int animation_frame = 0; animation_frame < requested_frames; ++animation_frame) {
+            int output_frame = start_frame + animation_frame;
+            double scene_time = output_frame / rain.frames_per_second;
+            rain.time = static_cast<float>(scene_time * rain.time_scale);
+            render_window_tree_scene(scene_time, output_frame, rain, clouds, lightning);
+        }
+    } else {
+        rain.time = start_frame * rain.time_scale / rain.frames_per_second;
+        render_window_tree_scene(rain.time, start_frame, rain, clouds, lightning);
     }
 
-    // BVH
-    int actual_num_objects = host_objects.size();
-    std::vector<int> prim_indices(actual_num_objects);
-    std::iota(prim_indices.begin(), prim_indices.end(), 0);
-    std::vector<bvh_node> host_bvh_nodes;
-    host_bvh_nodes.reserve(2 * actual_num_objects - 1);
-    int root_node_index =
-        build_bvh(host_bvh_nodes, prim_indices, host_objects.data(), 0, actual_num_objects);
-
-    // animate camera
-    double angle = t * 0.5;
-    double radius = from_eye_to_window_distance;
-    point3 eye(origin.x(), origin.y() + window_offset_y, origin.z());
-
-    camera cam;
-    cam.init(/*image_width=*/image_width, /*samples_per_pixel=*/400, /*max_depth=*/50,
-             /*aspect_ratio=*/16.0 / 9.0, /*vfov=*/90,
-             /*lookfrom=*/eye,
-             /*lookat=*/origin + vec3(0, window_offset_y, from_eye_to_window_distance),
-             /*vup=*/vec3(0, 1, 0),
-             /*defocus_angle=*/0.0, /*focus_dist=*/10, /*background=*/color(0.03, 0.04, 0.07));
-    cam.render(cam.image_width, cam.image_height, host_objects.data(), actual_num_objects,
-               /*host_textures=*/nullptr, /*num_textures=*/0, host_materials.data(),
-               host_materials.size(), host_bvh_nodes.data(), host_bvh_nodes.size(), root_node_index,
-               prim_indices.data(), actual_num_objects, light_indices.data(), light_indices.size(),
-               /*frame=*/frame);
-}
-
-int main() {
-    int num_frames = 1;
-    double fps = 30.0;
-    for (int frame = 0; frame < num_frames; ++frame) {
-        double t = frame / fps;
-        render_window_tree_scene(t, frame);
-        // primitive_test_scene(t, frame);
-        // render_scene(t, frame);
-        std::clog << "\rframe " << frame << " done" << std::flush;
+    if (lightning.enabled && lightning.thunder_enabled) {
+        double video_start_time = start_frame / rain.frames_per_second;
+        double video_duration = requested_frames / rain.frames_per_second;
+        int thunder_events = write_thunder_wav("build/thunder.wav", video_start_time,
+                                               video_duration, lightning, clouds);
+        if (thunder_events >= 0) {
+            std::clog << "generated build/thunder.wav with " << thunder_events
+                      << " audible thunder event(s)" << std::endl;
+        } else {
+            std::cerr << "Could not write build/thunder.wav\n";
+        }
     }
+    std::clog << std::endl;
     return 0;
 }

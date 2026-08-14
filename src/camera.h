@@ -102,5 +102,5 @@ struct camera {
                 texture_data* host_textures, int num_textures, material_data* host_materials,
                 int num_materials, bvh_node* host_bvh_nodes, int num_bvh_nodes, int root_node_index,
                 int* prim_indices, int num_prim_indices, int* light_indices = nullptr,
-                int num_lights = 0, int frame = 0);
+                int num_lights = 0, const rain_settings& rain = rain_settings(), int frame = 0);
 };

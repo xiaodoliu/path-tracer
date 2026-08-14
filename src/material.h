@@ -10,17 +10,21 @@ enum class material_type {
     DIELECTRIC,
     DIFFUSE_LIGHT,
     ISOTROPIC,
+    HENYEY_GREENSTEIN,
 };
 enum class scatter_pdf_type {
     NONE,
     COSINE,
     SPHERE,
+    HENYEY_GREENSTEIN,
 };
 struct scatter_record {
     color attenuation;
     scatter_pdf_type pdf_type = scatter_pdf_type::NONE;
     bool skip_pdf = false;
     ray skip_pdf_ray;
+    vec3 pdf_axis;
+    double anisotropy = 0.0;
 };
 
 struct material_data {
@@ -29,6 +33,27 @@ struct material_data {
     int texture_id = -1;
     double fuzz = 0.0;              // for metal material
     double refraction_index = 1.0;  // for dielectric material
+    bool receives_rain_post_process = false;
+    double anisotropy = 0.0;        // Henyey-Greenstein g (-1 back, +1 forward)
+};
+
+enum rain_mode {
+    NONE,
+    POST_PROCESSING,
+    PATH_TRACING,
+    HYBRID,
+};
+
+struct rain_settings {
+    rain_mode mode = rain_mode::POST_PROCESSING;
+    float size = 3.7f;
+    float time = 0.0f;
+    float time_offset = 1.0f;  // Unity's _T property
+    float distortion = -5.0f;
+    float blur = 0.05f;
+    int frame_count = 1;
+    float frames_per_second = 30.0f;
+    float time_scale = 1.0f;
 };
 
 D inline double reflectance(double cosine, double ri) {
@@ -47,6 +72,12 @@ D inline double scattering_pdf(const ray& r_in, const hit_record& rec, const ray
         case material_type::ISOTROPIC: {
             return 1 / (4 * pi);
         }
+        case material_type::HENYEY_GREENSTEIN: {
+            double g = mat_data.anisotropy;
+            double cosine = dot(normalize(r_in.direction()), normalize(scattered.direction()));
+            double denominator = 1.0 + g * g - 2.0 * g * cosine;
+            return (1.0 - g * g) / (4.0 * pi * denominator * sqrt(denominator));
+        }
         default:
             return 0;
     }
@@ -62,6 +93,8 @@ D inline bool scatter(const ray& r_in, const hit_record& rec, scatter_record& sr
                     ? texture_value(rec.u, rec.v, rec.p, device_textures[mat_data.texture_id])
                     : mat_data.albedo;
             srec.pdf_type = scatter_pdf_type::COSINE;
+            srec.pdf_axis = rec.normal;
+            srec.anisotropy = 0.0;
             srec.skip_pdf = false;
             return true;
         }
@@ -97,6 +130,19 @@ D inline bool scatter(const ray& r_in, const hit_record& rec, scatter_record& sr
                     ? texture_value(rec.u, rec.v, rec.p, device_textures[mat_data.texture_id])
                     : mat_data.albedo;
             srec.pdf_type = scatter_pdf_type::SPHERE;
+            srec.pdf_axis = rec.normal;
+            srec.anisotropy = 0.0;
+            srec.skip_pdf = false;
+            return true;
+        }
+        case material_type::HENYEY_GREENSTEIN: {
+            srec.attenuation =
+                mat_data.texture_id >= 0
+                    ? texture_value(rec.u, rec.v, rec.p, device_textures[mat_data.texture_id])
+                    : mat_data.albedo;
+            srec.pdf_type = scatter_pdf_type::HENYEY_GREENSTEIN;
+            srec.pdf_axis = normalize(r_in.direction());
+            srec.anisotropy = mat_data.anisotropy;
             srec.skip_pdf = false;
             return true;
         }
