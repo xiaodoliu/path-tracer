@@ -8,6 +8,12 @@
 
 struct scene_object;
 
+struct render_quality_settings {
+    int image_width = 1280;
+    int samples_per_pixel = 200;
+    int max_depth = 30;
+};
+
 struct camera {
     point3 origin = point3(0, 0, 0);
     double focal_length = 1.0;
@@ -17,6 +23,7 @@ struct camera {
     int samples_per_pixel = 100;
     int sqrt_spp = std::sqrt(samples_per_pixel);
     double recip_sqrt_spp = 1.0 / sqrt_spp;
+    bool use_stratified_sampling = true;
     int max_depth = 50;
     color background;
     double vfov = 90.0;
@@ -49,6 +56,7 @@ struct camera {
         this->samples_per_pixel = samples_per_pixel;
         this->sqrt_spp = std::sqrt(samples_per_pixel);
         this->recip_sqrt_spp = 1.0 / sqrt_spp;
+        this->use_stratified_sampling = sqrt_spp * sqrt_spp == samples_per_pixel;
         this->max_depth = max_depth;
         this->aspect_ratio = aspect_ratio;
         int image_height = static_cast<int>(image_width / aspect_ratio);
@@ -85,11 +93,17 @@ struct camera {
         return vec3(px, py, 0);
     }
 
-    D ray get_ray(int i, int j, int s_i, int s_j, curandState* state) {
-        // auto pixel_sample = pixel_sample_start +
-        //     (i+(random_double(state)-0.5)) * viewport_pixel_u_delta +
-        //     (j+(random_double(state)-0.5)) * viewport_pixel_v_delta;
-        auto offset = sample_square_stratified(s_i, s_j, state);
+    D ray get_ray(int i, int j, int sample_index, curandState* state) {
+        vec3 offset;
+        if (use_stratified_sampling) {
+            int s_i = sample_index % sqrt_spp;
+            int s_j = sample_index / sqrt_spp;
+            offset = sample_square_stratified(s_i, s_j, state);
+        } else {
+            // Arbitrary sample counts cannot fill a square stratification grid
+            // evenly, so use an unbiased random pixel sample instead.
+            offset = vec3(random_double(state) - 0.5, random_double(state) - 0.5, 0.0);
+        }
         auto pixel_sample = pixel_sample_start + (i + offset.x()) * viewport_pixel_u_delta +
                             (j + offset.y()) * viewport_pixel_v_delta;
         auto ray_origin = defocus_angle > 0 ? defocus_disk_sample(state) : origin;

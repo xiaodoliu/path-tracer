@@ -259,17 +259,15 @@ __global__ void render_kernel(unsigned char* image, int width, int height, camer
     color pixel_color(0, 0, 0);
     int pixel_index = (j * width + i) * 3;
     curandState local_rand_state = rand_states[pixel_index / 3];
-    for (int s_i = 0; s_i < cam.sqrt_spp; ++s_i) {
-        for (int s_j = 0; s_j < cam.sqrt_spp; ++s_j) {
-            r = cam.get_ray(i, j, s_i, s_j, &local_rand_state);
-            pixel_color +=
-                ray_color(r, cam.max_depth, cam.background, device_objects, num_objects,
-                          device_textures, num_textures, device_materials, num_materials,
-                          device_bvh_nodes, num_bvh_nodes, root_node_index, device_prim_indices,
-                          num_prim_indices, device_light_indices, num_lights, &local_rand_state);
-        }
+    for (int sample = 0; sample < cam.samples_per_pixel; ++sample) {
+        r = cam.get_ray(i, j, sample, &local_rand_state);
+        pixel_color +=
+            ray_color(r, cam.max_depth, cam.background, device_objects, num_objects,
+                      device_textures, num_textures, device_materials, num_materials,
+                      device_bvh_nodes, num_bvh_nodes, root_node_index, device_prim_indices,
+                      num_prim_indices, device_light_indices, num_lights, &local_rand_state);
     }
-    pixel_color /= (cam.sqrt_spp * cam.sqrt_spp * 1.0);
+    pixel_color /= static_cast<double>(cam.samples_per_pixel);
     write_color(image, pixel_index, pixel_color);
 
     if (window_mask != nullptr) {
@@ -361,7 +359,7 @@ void camera::render(int width, int height, scene_object* host_objects, int num_o
         std::ostringstream name;
         name << "build/frames/frame_" << std::setw(4) << std::setfill('0') << output_frame
              << ".ppm";
-        std::ofstream out(name.str());
+        std::ofstream out(name.str(), std::ios::binary);
         write_image(out, host_image, width, height);
         std::clog << "\rframe " << output_frame << " done" << std::flush;
     };
@@ -400,6 +398,7 @@ int main(int argc, char** argv) {
     rain_settings rain;
     cloud_settings clouds;
     lightning_settings lightning;
+    render_quality_settings quality;
     rain.mode = rain_mode::POST_PROCESSING;
     rain.size = 3.7f;
     rain.distortion = -5.0f;
@@ -409,9 +408,11 @@ int main(int argc, char** argv) {
     auto print_usage = [&]() {
         std::cout
             << "Usage: " << argv[0]
-            << " [--frames N] [--fps N] [--start-frame N] [--time-scale N]"
+            << " [--fast] [--width N] [--samples N] [--max-depth N]"
+               " [--frames N] [--fps N] [--start-frame N] [--time-scale N]"
                " [--clouds] [--cloud-speed N] [--cloud-density N]"
-               " [--cloud-start-x N] [--lightning] [--lightning-first N]"
+               " [--cloud-start-x N] [--cloud-count N]"
+               " [--lightning] [--lightning-first N]"
                " [--lightning-interval N] [--lightning-intensity N]"
                " [--lightning-seed N] [--thunder-delay N] [--thunder-volume N]"
                " [--no-thunder] [--no-rain]\n";
@@ -426,6 +427,12 @@ int main(int argc, char** argv) {
             }
             if (option == "--clouds") {
                 clouds.enabled = true;
+                continue;
+            }
+            if (option == "--fast") {
+                quality.image_width = 640;
+                quality.samples_per_pixel = 9;
+                quality.max_depth = 6;
                 continue;
             }
             if (option == "--no-rain") {
@@ -444,7 +451,13 @@ int main(int argc, char** argv) {
                 throw std::invalid_argument("missing value for " + option);
             }
             std::string value = argv[++arg];
-            if (option == "--frames") {
+            if (option == "--width") {
+                quality.image_width = std::stoi(value);
+            } else if (option == "--samples") {
+                quality.samples_per_pixel = std::stoi(value);
+            } else if (option == "--max-depth") {
+                quality.max_depth = std::stoi(value);
+            } else if (option == "--frames") {
                 rain.frame_count = std::stoi(value);
             } else if (option == "--fps") {
                 rain.frames_per_second = std::stof(value);
@@ -461,6 +474,9 @@ int main(int argc, char** argv) {
             } else if (option == "--cloud-start-x") {
                 clouds.enabled = true;
                 clouds.start_x = std::stod(value);
+            } else if (option == "--cloud-count") {
+                clouds.enabled = true;
+                clouds.bank_count = std::stoi(value);
             } else if (option == "--lightning-first") {
                 lightning.enabled = true;
                 lightning.first_strike = std::stod(value);
@@ -489,15 +505,22 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (rain.frame_count < 1 || rain.frames_per_second <= 0.0f || start_frame < 0 ||
+    if (quality.image_width < 16 || quality.samples_per_pixel < 1 || quality.max_depth < 1 ||
+        rain.frame_count < 1 || rain.frames_per_second <= 0.0f || start_frame < 0 ||
+        clouds.bank_count < 1 ||
         clouds.speed < 0.0 || clouds.density <= 0.0 || lightning.first_strike < 0.0 ||
         lightning.interval <= 0.0 || lightning.intensity <= 0.0 ||
         lightning.thunder_delay < 0.0 || lightning.thunder_volume < 0.0) {
-        std::cerr << "Frames, FPS, and cloud density must be positive; start frame and cloud "
-                     "speed cannot be negative. Lightning timing, intensity, and thunder "
-                     "settings must also be valid.\n";
+        std::cerr << "Width must be at least 16. Samples, depth, frames, FPS, cloud count, and "
+                     "cloud density must be positive; start frame and cloud speed cannot be "
+                     "negative. Lightning timing, intensity, and thunder settings must also "
+                     "be valid.\n";
         return 1;
     }
+
+    std::clog << "render settings: " << quality.image_width << "px wide, "
+              << quality.samples_per_pixel << " sample(s)/pixel, depth " << quality.max_depth
+              << ", " << clouds.bank_count << " cloud bank(s)" << std::endl;
 
     int requested_frames = rain.frame_count;
     bool dynamic_scene = clouds.enabled || lightning.enabled;
@@ -510,11 +533,11 @@ int main(int argc, char** argv) {
             int output_frame = start_frame + animation_frame;
             double scene_time = output_frame / rain.frames_per_second;
             rain.time = static_cast<float>(scene_time * rain.time_scale);
-            render_window_tree_scene(scene_time, output_frame, rain, clouds, lightning);
+            render_window_tree_scene(scene_time, output_frame, rain, clouds, lightning, quality);
         }
     } else {
         rain.time = start_frame * rain.time_scale / rain.frames_per_second;
-        render_window_tree_scene(rain.time, start_frame, rain, clouds, lightning);
+        render_window_tree_scene(rain.time, start_frame, rain, clouds, lightning, quality);
     }
 
     if (lightning.enabled && lightning.thunder_enabled) {

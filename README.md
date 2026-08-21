@@ -1,3 +1,185 @@
+# CUDA Path Tracer
+
+## Quick Start: Build, Test, Render, and Assemble
+
+Run all commands from the repository root:
+
+```bash
+cd /path/to/path-tracer
+```
+
+Replace `/path/to/path-tracer` with the location where you cloned the
+repository. If your terminal is already in the repository root, skip this
+command.
+
+### 1. Build with CUDA and C++20
+
+```bash
+mkdir -p build/frames
+
+nvcc -std=c++20 -O2 -I. \
+  src/main.cu \
+  -o build/main
+```
+
+### 2. Benchmark one fast frame
+
+```bash
+time ./build/main \
+  --fast \
+  --clouds \
+  --cloud-count 3 \
+  --cloud-density 0.70 \
+  --lightning \
+  --no-thunder \
+  --frames 1 \
+  --fps 30
+```
+
+`--fast` is equivalent to:
+
+```text
+--width 640 --samples 9 --max-depth 6
+```
+
+It changes only render resolution and path-tracing quality. It does not change
+FPS, cloud movement, cloud density, lightning, or rain. Options written after
+`--fast` override individual preset values.
+
+Convert the first frame to PNG for inspection:
+
+```bash
+ffmpeg -y \
+  -i build/frames/frame_0000.ppm \
+  build/frame_0000.png
+```
+
+### 3. Render a fast 40-second storm
+
+At 30 FPS, 1,200 frames produce a 40-second video:
+
+```bash
+./build/main \
+  --fast \
+  --clouds \
+  --cloud-count 3 \
+  --cloud-speed 3.0 \
+  --cloud-density 0.70 \
+  --lightning \
+  --frames 1200 \
+  --fps 30 \
+  --lightning-first 0.8 \
+  --lightning-interval 6.0
+```
+
+When the render finishes normally, it writes frames `0000` through `1199` and
+then generates `build/thunder.wav`.
+
+### 4. Render at 1280x720 with reduced sampling
+
+This is slower than `--fast` but higher resolution:
+
+```bash
+./build/main \
+  --width 1280 \
+  --samples 16 \
+  --max-depth 8 \
+  --clouds \
+  --cloud-count 3 \
+  --cloud-speed 3.0 \
+  --cloud-density 0.70 \
+  --lightning \
+  --frames 1200 \
+  --fps 30 \
+  --lightning-first 0.8 \
+  --lightning-interval 6.0
+```
+
+### 5. Assemble all frames and thunder into MP4
+
+Use the same frame rate and frame count that were passed to the renderer:
+
+```bash
+ffmpeg -y \
+  -framerate 30 \
+  -start_number 0 \
+  -i build/frames/frame_%04d.ppm \
+  -i build/thunder.wav \
+  -frames:v 1200 \
+  -map 0:v:0 \
+  -map 1:a:0 \
+  -c:v libx264 \
+  -preset slow \
+  -crf 18 \
+  -pix_fmt yuv420p \
+  -c:a aac \
+  -b:a 192k \
+  -shortest \
+  build/thunderstorm_40s.mp4
+```
+
+### 6. Assemble an interrupted render
+
+If the last message is `frame 826 done`, frames `0000` through `0826` normally
+exist, giving 827 frames total. Confirm the last file first:
+
+```bash
+ls -l build/frames/frame_0826.ppm
+```
+
+Then encode exactly those frames without audio:
+
+```bash
+ffmpeg -y \
+  -framerate 30 \
+  -start_number 0 \
+  -i build/frames/frame_%04d.ppm \
+  -frames:v 827 \
+  -map 0:v:0 \
+  -an \
+  -c:v libx264 \
+  -preset slow \
+  -crf 18 \
+  -pix_fmt yuv420p \
+  build/storm_partial.mp4
+```
+
+Replace `827` with the actual number of contiguous frames. Limiting
+`-frames:v` prevents stale files from an earlier render from being appended.
+An interrupted render does not regenerate `thunder.wav`, so an existing WAV
+may be stale or only a fraction of a second long.
+
+## Render Quality and Performance
+
+The default remains the high-quality 1280-wide, 200-sample, depth-30 render.
+Use the fast preset for animation previews:
+
+```bash
+./build/main --fast --clouds --lightning --frames 300 --fps 30
+```
+
+The fast preset uses a 640-pixel width, 9 samples per pixel, and a maximum path
+depth of 6. Each value can also be controlled independently; put overrides
+after `--fast` when combining them:
+
+```bash
+./build/main --fast --width 1280 --samples 16 --max-depth 8 \
+  --clouds --cloud-count 3 --lightning --frames 300 --fps 30
+```
+
+Useful controls:
+
+```text
+--fast             Preview preset: width 640, 9 samples, depth 6
+--width N          Output width; height follows the 16:9 aspect ratio
+--samples N        Exact path-tracing samples per pixel
+--max-depth N      Maximum path bounces
+--cloud-count N    Number of independently moving cloud banks
+```
+
+Frames use binary P6 PPM encoding. FFmpeg reads these with the same
+`frame_%04d.ppm` input pattern as the previous ASCII PPM files.
+
 ## Render Video
 
 The post-processing animation path traces the scene once, then applies the

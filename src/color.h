@@ -28,14 +28,9 @@ D inline void write_color(unsigned char* image, int pixel_index, color pixel_col
 }
 
 // Print out image data as ppm format.
-inline void write_image(std::ostream& out, std::vector<unsigned char>& image, int width,
+inline void write_image(std::ostream& out, const std::vector<unsigned char>& image, int width,
                         int height) {
-    out << "P3\n" << width << " " << height << "\n255\n";
-    for (size_t i = 0; i < image.size(); ++i) {
-        out << static_cast<int>(image[i]) << " ";
-        if ((i + 1) % 3 == 0) {
-            out << "\n";
-        }
-    }
-    out << std::endl;
+    out << "P6\n" << width << " " << height << "\n255\n";
+    out.write(reinterpret_cast<const char*>(image.data()),
+              static_cast<std::streamsize>(image.size()));
 }

@@ -45,7 +45,8 @@ struct heterogeneous_medium {
           light_material_id(light_material),
           lobe_count(0) {}
 
-    H void add_lobe(const point3& center, double radius, double density_scale, bool lighter) {
+    H void add_lobe(const point3& center, double radius,
+                    double density_scale, bool lighter) {
         if (lobe_count < max_lobes) {
             lobes[lobe_count++] = {center, radius, density_scale, lighter};
         }
@@ -105,11 +106,11 @@ struct heterogeneous_medium {
     }
 
     HD static double cloud_noise(const point3& p) {
-        // Low frequencies form broad cavities; the last octave roughens only
-        // the silhouette enough to remain stable at animation resolution.
-        return 0.55 * value_noise(0.18 * p) +
-               0.30 * value_noise(0.43 * p + vec3(11.7, 4.1, 8.3)) +
-               0.15 * value_noise(1.05 * p + vec3(3.2, 19.1, 5.7));
+        // Favor broad structures over fine erosion. High-frequency holes made
+        // the projected cloud shadow shimmer like water at low sample counts.
+        return 0.65 * value_noise(0.16 * p) +
+               0.27 * value_noise(0.38 * p + vec3(11.7, 4.1, 8.3)) +
+               0.08 * value_noise(0.82 * p + vec3(3.2, 19.1, 5.7));
     }
 
     HD double density_at(const point3& p) const {
@@ -132,13 +133,13 @@ struct heterogeneous_medium {
 
         // Noise erodes the nominal lobe boundary. The smooth ramp produces
         // wisps instead of a hard procedural cutout.
-        double eroded_shape = coverage + 0.42 * (noise - 0.5);
-        double edge = smoothstep(0.015, 0.32, eroded_shape);
+        double eroded_shape = coverage + 0.26 * (noise - 0.5);
+        double edge = smoothstep(0.01, 0.24, eroded_shape);
 
         // Cumulus/storm clouds tend to have a comparatively level base. Keep
         // that transition sharper than the noisy, billowing upper surface.
         double base_profile = smoothstep(cloud_base_y, cloud_base_y + 0.55, p.y());
-        double interior_variation = 0.58 + 0.42 * noise;
+        double interior_variation = 0.72 + 0.28 * noise;
         return base_density * lobe_density_scale * edge * base_profile * interior_variation;
     }
 

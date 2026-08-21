@@ -10,7 +10,8 @@
 
 void render_window_tree_scene(double t, int frame, const rain_settings& rain,
                               const cloud_settings& clouds = cloud_settings(),
-                              const lightning_settings& lightning = lightning_settings()) {
+                              const lightning_settings& lightning = lightning_settings(),
+                              const render_quality_settings& quality = render_quality_settings()) {
     std::vector<material_data> host_materials;
     std::unordered_map<std::string, int> material_id_map;
     lightning_frame_state lightning_frame = lightning_at_time(t, lightning, clouds);
@@ -368,14 +369,18 @@ void render_window_tree_scene(double t, int frame, const rain_settings& rain,
 
         auto add_cloud = [&](double moving_x, double y, double z, double scale,
                              std::uint32_t variation_seed) {
+            // Keep each bank deep enough to cast a substantial patch rather
+            // than the thin line produced by the original planar layout.
+            constexpr double width_scale = 0.55;
+            constexpr double depth_scale = 1.55;
             point3 origin(moving_x, y, z);
             point3 noise_origin =
                 origin - vec3(11.0 * cloud_random01(clouds.seed, variation_seed + 1u),
                               7.0 * cloud_random01(clouds.seed, variation_seed + 2u),
                               9.0 * cloud_random01(clouds.seed, variation_seed + 3u));
             heterogeneous_medium medium(
-                point3(moving_x - 16.5 * scale, y - 3.2 * scale, z - 6.0 * scale),
-                point3(moving_x + 16.5 * scale, y + 6.0 * scale, z + 6.0 * scale),
+                point3(moving_x - 11.5 * scale, y - 3.2 * scale, z - 9.5 * scale),
+                point3(moving_x + 11.5 * scale, y + 6.5 * scale, z + 9.5 * scale),
                 noise_origin, clouds.density, y - 3.0 * scale,
                 material_id_map.at("cloud_dark"), material_id_map.at("cloud_light"));
             for (int lobe_index = 0;
@@ -392,9 +397,9 @@ void render_window_tree_scene(double t, int frame, const rain_settings& rain,
                 double density_variation =
                     0.85 + 0.30 * cloud_random01(clouds.seed, lobe_stream + 3u);
                 medium.add_lobe(
-                    point3(moving_x + scale * lobe.x,
+                    point3(moving_x + scale * width_scale * lobe.x,
                            y + scale * (lobe.y + y_variation),
-                           z + scale * (lobe.z + z_variation)),
+                           z + scale * depth_scale * (lobe.z + z_variation)),
                     scale * lobe.radius * radius_variation,
                     lobe.density_scale * density_variation, lobe.lighter);
             }
@@ -418,9 +423,10 @@ void render_window_tree_scene(double t, int frame, const rain_settings& rain,
                 10000u + static_cast<std::uint32_t>(bank) * 1000u +
                 static_cast<std::uint32_t>(cycle_index + 100000) * 79u;
 
-            double scale = 0.48 + 0.28 * cloud_random01(clouds.seed, variation_seed + 4u);
-            double y = 10.0 + 2.0 * cloud_random01(clouds.seed, variation_seed + 5u);
-            double z = 15.0 + 8.0 * cloud_random01(clouds.seed, variation_seed + 6u);
+            double scale = 0.72 + 0.28 * cloud_random01(clouds.seed, variation_seed + 4u);
+            // Keep the cloud base safely above the tallest tree canopy.
+            double y = 11.5 + 1.0 * cloud_random01(clouds.seed, variation_seed + 5u);
+            double z = 15.0 + 6.0 * cloud_random01(clouds.seed, variation_seed + 6u);
             add_cloud(moving_x, y, z, scale, variation_seed);
         }
     }
@@ -532,9 +538,9 @@ void render_window_tree_scene(double t, int frame, const rain_settings& rain,
     // ------------------------------------------------------------------
     camera cam;
     cam.init(
-        /*image_width=*/1280,
-        /*samples_per_pixel=*/200,
-        /*max_depth=*/30,
+        /*image_width=*/quality.image_width,
+        /*samples_per_pixel=*/quality.samples_per_pixel,
+        /*max_depth=*/quality.max_depth,
         /*aspect_ratio=*/16.0 / 9.0,
         /*vfov=*/40.0,
         /*lookfrom=*/point3(0.0, 4.2, -2.5),
